@@ -1137,6 +1137,7 @@ object SanctuaryCore {
     }
 
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
+        val appContext = context.applicationContext
         ensureNetworkMonitor(appContext)
         startMicroBatchCollector(appContext)
 
