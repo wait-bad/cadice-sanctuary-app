@@ -78,12 +78,10 @@ object SanctuaryCore {
     val userMap = ConcurrentHashMap<Int, UserProfile>()
     val onlineMap = ConcurrentHashMap<Int, Boolean>()
 
-    // 内存头像缓存 (最多存 100 张缩放后头像)
     private val avatarMemoryCache = LruCache<String, Bitmap>(100)
     private val inFlightAvatars = ConcurrentHashMap<String, Deferred<Bitmap?>>()
     private val coreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // 保护 Token 自动续期的互斥锁，防止并发重复 renew
     private val renewMutex = Mutex()
     private val previewSemaphore = Semaphore(3)
     private val avatarSemaphore = Semaphore(2)
@@ -91,7 +89,6 @@ object SanctuaryCore {
     @Volatile
     var activeToken: String = ""
 
-    // 全局实时事件总线
     private val _incomingMessages = MutableSharedFlow<IncomingChatEvent>(extraBufferCapacity = 64)
     val incomingMessages = _incomingMessages.asSharedFlow()
 
@@ -126,12 +123,221 @@ object SanctuaryCore {
         userMap.clear()
         onlineMap.clear()
         inFlightAvatars.clear()
-        context?.let {
-            File(it.cacheDir, "snapshot_home.json").delete()
+        // 注意：故意保留 SQLite 永久离线库 (SanctuaryDb) 与本地消息记录，退出账号再登录依然完整保留！
+    }
+
+    // ==================== 🔖 持久化游标（彻底根除反复弹出未读 & 重复全量拉取） ====================
+
+    private fun readMidKey(myUid: Int, isGroup: Boolean, targetId: Int): String {
+        return "read_mid_${myUid}_${if (isGroup) "g" else "u"}_$targetId"
+    }
+
+    fun getLastReadMid(context: Context, myUid: Int, isGroup: Boolean, targetId: Int): Long {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getLong(readMidKey(myUid, isGroup, targetId), 0L)
+    }
+
+    fun setLastReadMidLocal(context: Context, myUid: Int, isGroup: Boolean, targetId: Int, mid: Long) {
+        if (mid <= 0L) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val key = readMidKey(myUid, isGroup, targetId)
+        val old = prefs.getLong(key, 0L)
+        if (mid > old) {
+            prefs.edit().putLong(key, mid).apply()
         }
     }
 
-    // 🔐 核心保活：检查并自动刷新 VoceChat 5分钟短期 AccessToken！
+    // 标记会话已读：本地持久化 + 异步同步到 VoceChat 服务器 /api/user/read-index
+    fun markConversationRead(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        mid: Long
+    ) {
+        if (mid <= 0L) return
+        setLastReadMidLocal(context, myUid, isGroup, targetId, mid)
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            try {
+                val payload = JSONObject().apply {
+                    if (isGroup) {
+                        put("groups", JSONArray().put(JSONObject().apply {
+                            put("gid", targetId)
+                            put("mid", mid)
+                        }))
+                        put("users", JSONArray())
+                    } else {
+                        put("groups", JSONArray())
+                        put("users", JSONArray().put(JSONObject().apply {
+                            put("uid", targetId)
+                            put("mid", mid)
+                        }))
+                    }
+                }
+                executeAuthorized(appCtx) { tk ->
+                    Request.Builder()
+                        .url("$serverUrl/api/user/read-index")
+                        .header("X-API-Key", tk)
+                        .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build()
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun getGlobalMaxMid(context: Context, myUid: Int): Long {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getLong("global_max_mid_$myUid", 0L)
+    }
+
+    fun updateGlobalMaxMid(context: Context, myUid: Int, mid: Long) {
+        if (mid <= 0L || mid >= ChatMessage.TEMP_MID_BASE) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val key = "global_max_mid_$myUid"
+        if (mid > prefs.getLong(key, 0L)) {
+            prefs.edit().putLong(key, mid).apply()
+        }
+    }
+
+    // ==================== 💾 永久离线 SQLite 聊天记录存储（按服务器 + 账号 UID 严格隔离） ====================
+
+    fun loadLocalChatPage(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        beforeMid: Long = Long.MAX_VALUE,
+        limit: Int = 50
+    ): List<ChatMessage> {
+        return SanctuaryDb.getInstance(context).getMessagesPage(serverUrl, myUid, isGroup, targetId, beforeMid, limit)
+    }
+
+    fun getLocalConversationMaxMid(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int
+    ): Long {
+        return SanctuaryDb.getInstance(context).getMaxMidForConversation(serverUrl, myUid, isGroup, targetId)
+    }
+
+    fun saveLocalChatMessages(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        messages: List<ChatMessage>
+    ) {
+        if (messages.isEmpty()) return
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).upsertMessages(serverUrl, myUid, isGroup, targetId, messages)
+        }
+    }
+
+    fun deleteLocalChatMessage(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        mid: Long
+    ) {
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).deleteMessage(serverUrl, myUid, isGroup, targetId, mid)
+        }
+    }
+
+    fun promotePendingMessage(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        tempMid: Long,
+        realMsg: ChatMessage
+    ) {
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).promotePendingMessage(serverUrl, myUid, isGroup, targetId, tempMid, realMsg)
+        }
+    }
+
+    fun updateLocalMessageStatus(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        mid: Long,
+        syncStatus: Int
+    ) {
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).updateMessageSyncStatus(serverUrl, myUid, isGroup, targetId, mid, syncStatus)
+        }
+    }
+
+    fun clearLocalChatHistory(context: Context, serverUrl: String, myUid: Int, isGroup: Boolean, targetId: Int) {
+        SanctuaryDb.getInstance(context).clearConversationMessages(serverUrl, myUid, isGroup, targetId)
+    }
+
+    fun saveDraft(context: Context, serverUrl: String, myUid: Int, isGroup: Boolean, targetId: Int, content: String) {
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).saveDraft(serverUrl, myUid, isGroup, targetId, content)
+        }
+    }
+
+    fun getDraft(context: Context, serverUrl: String, myUid: Int, isGroup: Boolean, targetId: Int): String {
+        return SanctuaryDb.getInstance(context).getDraft(serverUrl, myUid, isGroup, targetId)
+    }
+
+    fun getAllDrafts(context: Context, serverUrl: String, myUid: Int): Map<Pair<Boolean, Int>, String> {
+        return SanctuaryDb.getInstance(context).getAllDrafts(serverUrl, myUid)
+    }
+
+    fun deleteDraft(context: Context, serverUrl: String, myUid: Int, isGroup: Boolean, targetId: Int) {
+        val appCtx = context.applicationContext
+        coreScope.launch {
+            SanctuaryDb.getInstance(appCtx).deleteDraft(serverUrl, myUid, isGroup, targetId)
+        }
+    }
+
+    // 🗑️ 向服务器请求删除单条消息 (DELETE /api/message/{mid})
+    suspend fun deleteServerMessage(
+        context: Context,
+        serverUrl: String,
+        mid: Long
+    ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        try {
+            val (code, body) = executeAuthorized(context) { tk ->
+                Request.Builder()
+                    .url("$serverUrl/api/message/$mid")
+                    .header("X-API-Key", tk)
+                    .delete()
+                    .build()
+            }
+            when {
+                code in 200..299 -> Pair(true, "已从服务器删除该消息")
+                code == 403 -> Pair(false, "无权删除他人消息 (HTTP 403)")
+                code == 404 -> Pair(true, "消息已在服务器移除")
+                else -> Pair(false, "删除失败 (HTTP $code) $body")
+            }
+        } catch (e: Exception) {
+            Pair(false, "删除异常: ${e.localizedMessage}")
+        }
+    }
+
+    // ==================== 🔐 Token 5分钟自动续期与请求封装 ====================
+
     suspend fun ensureValidToken(context: Context, forceRenew: Boolean = false): String? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: ""
@@ -144,14 +350,12 @@ object SanctuaryCore {
         activeToken = currentToken
 
         val now = System.currentTimeMillis()
-        // 若距离过期不足 60 秒（或强制刷新），则调用 /api/token/renew 续期
         val needsRenew = forceRenew || obtainedAt == 0L || (now - obtainedAt) >= ((expiredInSec - 60).coerceAtLeast(30) * 1000L)
         if (!needsRenew) {
             return currentToken
         }
 
         if (refreshToken.isEmpty()) {
-            // 老版本升级上来还没有保存 refresh_token：强制刷新时触发温和重登提醒，否则先试着用旧 token
             if (forceRenew) {
                 _authExpiredEvents.tryEmit(Unit)
                 return null
@@ -160,7 +364,6 @@ object SanctuaryCore {
         }
 
         return renewMutex.withLock {
-            // 双重检查，避免刚被另一个协程续期过
             val latestToken = prefs.getString(KEY_TOKEN, "") ?: ""
             val latestObtained = prefs.getLong(KEY_TOKEN_OBTAINED_AT, 0L)
             val latestExp = prefs.getLong(KEY_TOKEN_EXPIRED_IN, 300L)
@@ -203,13 +406,11 @@ object SanctuaryCore {
                     }
                 } catch (_: Exception) {
                 }
-                // 网络抖动没续上时，若非强制刷新，先返回现有 token；强制刷新失败则交由调用方处理
                 if (forceRenew) null else (prefs.getString(KEY_TOKEN, "") ?: currentToken)
             }
         }
     }
 
-    // 🛡️ 带自动 401 续期重试的通用请求执行器
     suspend fun executeAuthorized(context: Context, requestBuilder: (token: String) -> Request): Pair<Int, String> {
         val token1 = ensureValidToken(context, forceRenew = false) ?: return Pair(401, "")
         val firstAttempt = withContext(Dispatchers.IO) {
@@ -220,7 +421,6 @@ object SanctuaryCore {
         if (firstAttempt.first != 401) {
             return firstAttempt
         }
-        // 遇到 401 立即强制 renew 后重试一次
         val token2 = ensureValidToken(context, forceRenew = true) ?: return Pair(401, "")
         return withContext(Dispatchers.IO) {
             httpClient.newCall(requestBuilder(token2)).execute().use { res ->
@@ -229,21 +429,20 @@ object SanctuaryCore {
         }
     }
 
-    // 💾 读取本地列表快照（0ms 秒开首屏）
-    fun loadHomeSnapshot(context: Context): Pair<List<ConversationItem>, List<ConversationItem>>? {
+    // ==================== 💾 首页列表快照 ====================
+
+    fun loadHomeSnapshot(context: Context, serverUrl: String, myUid: Int): Pair<List<ConversationItem>, List<ConversationItem>>? {
         return try {
-            val file = File(context.cacheDir, "snapshot_home.json")
-            if (!file.exists()) return null
-            val root = JSONObject(file.readText())
-            val usersArr = root.optJSONArray("users")
-            if (usersArr != null) {
+            val dbItems = SanctuaryDb.getInstance(context).loadConversations(serverUrl, myUid)
+            // 同步恢复用户资料快照以便离线显示昵称与头像时间戳
+            val file = File(context.filesDir, "users_profile_${myUid}.json")
+            if (file.exists()) {
+                val usersArr = JSONArray(file.readText())
                 for (i in 0 until usersArr.length()) {
                     putUserJson(usersArr.getJSONObject(i))
                 }
             }
-            val convs = jsonToItems(root.optJSONArray("conversations"))
-            val contacts = jsonToItems(root.optJSONArray("contacts"))
-            if (convs.isEmpty() && contacts.isEmpty()) null else Pair(convs, contacts)
+            if (dbItems.isEmpty()) null else Pair(dbItems, dbItems)
         } catch (_: Exception) {
             null
         }
@@ -251,12 +450,15 @@ object SanctuaryCore {
 
     fun saveHomeSnapshot(
         context: Context,
-        conversations: List<ConversationItem>,
-        contacts: List<ConversationItem>
+        serverUrl: String,
+        myUid: Int,
+        conversations: List<ConversationItem>
     ) {
+        val convCopy = conversations.toList()
+        val appCtx = context.applicationContext
         coreScope.launch {
             try {
-                val root = JSONObject()
+                SanctuaryDb.getInstance(appCtx).saveConversations(serverUrl, myUid, convCopy)
                 val usersArr = JSONArray()
                 userMap.values.forEach { u ->
                     usersArr.put(JSONObject().apply {
@@ -268,10 +470,7 @@ object SanctuaryCore {
                         put("is_bot", u.isBot)
                     })
                 }
-                root.put("users", usersArr)
-                root.put("conversations", itemsToJson(conversations))
-                root.put("contacts", itemsToJson(contacts))
-                File(context.cacheDir, "snapshot_home.json").writeText(root.toString())
+                File(appCtx.filesDir, "users_profile_${myUid}.json").writeText(usersArr.toString())
             } catch (_: Exception) {
             }
         }
@@ -287,6 +486,7 @@ object SanctuaryCore {
                 put("description", item.description)
                 put("lastMsg", item.lastMsg)
                 put("lastTime", item.lastTime)
+                put("lastMid", item.lastMid)
                 put("unreadCount", item.unreadCount)
                 put("avatarUpdatedAt", item.avatarUpdatedAt)
                 put("badge", item.badge)
@@ -310,6 +510,7 @@ object SanctuaryCore {
                     description = o.optString("description", ""),
                     lastMsg = o.optString("lastMsg", ""),
                     lastTime = o.optLong("lastTime", 0L),
+                    lastMid = o.optLong("lastMid", 0L),
                     unreadCount = o.optInt("unreadCount", 0),
                     avatarUpdatedAt = o.optLong("avatarUpdatedAt", 0L),
                     isOnline = if (isGroup) false else isUserOnline(id),
@@ -320,13 +521,13 @@ object SanctuaryCore {
         return list
     }
 
-    // ⚡ 阶段一：并发拉取用户表、群组、好友联系人（自动续期 + 错峰防超时）
+    // ==================== ⚡ 基础名录 & 增量摘要拉取 ====================
+
     suspend fun fetchBaseDirectory(
         context: Context,
         serverUrl: String,
         myUid: Int
     ): Pair<List<ConversationItem>, List<ConversationItem>> = withContext(Dispatchers.IO) {
-        // 先保证拿到可用有效 Token，避免三路同时撞 401
         ensureValidToken(context, forceRenew = false)
 
         coroutineScope {
@@ -457,22 +658,21 @@ object SanctuaryCore {
                 }
 
             val allContacts = groupItems + memberItems
-            val baseConversations = groupItems + memberItems
-            Pair(baseConversations, allContacts)
+            Pair(allContacts, allContacts)
         }
     }
 
-    // ⚡ 阶段二：限流并发（最多同时 3 路）补全会话最后一条消息摘要，彻底避免把隧道挤超时！
     suspend fun hydrateLatestPreviews(
         context: Context,
         serverUrl: String,
+        myUid: Int,
         items: List<ConversationItem>
     ): List<ConversationItem> = withContext(Dispatchers.IO) {
         coroutineScope {
             items.map { item ->
                 async {
                     previewSemaphore.withPermit {
-                        fetchLatestPreview(context, serverUrl, item)
+                        fetchLatestPreview(context, serverUrl, myUid, item)
                     }
                 }
             }.awaitAll()
@@ -487,6 +687,7 @@ object SanctuaryCore {
     private suspend fun fetchLatestPreview(
         context: Context,
         serverUrl: String,
+        myUid: Int,
         item: ConversationItem
     ): ConversationItem {
         return try {
@@ -506,6 +707,7 @@ object SanctuaryCore {
                 val arr = JSONArray(body)
                 if (arr.length() > 0) {
                     val lastObj = arr.getJSONObject(arr.length() - 1)
+                    val mid = lastObj.optLong("mid", 0L)
                     val fromUid = lastObj.optInt("from_uid", -1)
                     val createdAt = normalizeTimestampMs(lastObj.optLong("created_at", 0L))
                     val detail = lastObj.optJSONObject("detail")
@@ -515,9 +717,21 @@ object SanctuaryCore {
                     } else {
                         previewText
                     }
+                    updateGlobalMaxMid(context, myUid, mid)
+
+                    val lastRead = getLastReadMid(context, myUid, item.isGroup, item.id)
+                    // 初次初始化若无本地游标且非本人刚发，默认把已有历史基准记为已读，避免首次进入满屏假红点
+                    if (lastRead == 0L && mid > 0L) {
+                        setLastReadMidLocal(context, myUid, item.isGroup, item.id, mid)
+                    }
+                    val finalRead = getLastReadMid(context, myUid, item.isGroup, item.id)
+                    val unread = if (mid <= finalRead || fromUid == myUid) 0 else item.unreadCount.coerceAtLeast(1)
+
                     return item.copy(
                         lastMsg = formatted,
-                        lastTime = createdAt
+                        lastTime = createdAt,
+                        lastMid = mid,
+                        unreadCount = unread
                     )
                 }
             }
@@ -527,7 +741,8 @@ object SanctuaryCore {
         }
     }
 
-    // 🖼️ 上传当前用户个人头像 (自动缩放到 512px 以内 PNG 提交到 /api/user/avatar)
+    // ==================== 🖼️ 头像上传与双层缓存 ====================
+
     suspend fun uploadUserAvatar(
         context: Context,
         serverUrl: String,
@@ -571,7 +786,8 @@ object SanctuaryCore {
         }
     }
 
-    // 🔌 启动 VoceChat SSE 实时事件流（每次重连都先自动续期 Token，绝不再用过期 Token 空转）
+    // ==================== 🔌 增量 SSE 实时事件流 (带 after_mid 与 ready 识别) ====================
+
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
         val appContext = context.applicationContext
         sseJob?.cancel()
@@ -585,12 +801,21 @@ object SanctuaryCore {
                         continue
                     }
 
+                    // 关键升级：携带本地已同步到的 globalMaxMid，防止每次重连重复重放历史消息！
+                    val afterMid = getGlobalMaxMid(appContext, myUid)
+                    val sseUrl = if (afterMid > 0L) {
+                        "$serverUrl/api/user/events?api-key=$freshToken&after_mid=$afterMid"
+                    } else {
+                        "$serverUrl/api/user/events?api-key=$freshToken"
+                    }
+
                     val req = Request.Builder()
-                        .url("$serverUrl/api/user/events?api-key=$freshToken")
+                        .url(sseUrl)
                         .header("Accept", "text/event-stream")
                         .get()
                         .build()
 
+                    var sseReady = false
                     sseClient.newCall(req).execute().use { response ->
                         if (response.isSuccessful) {
                             backoffMs = 2000L
@@ -600,12 +825,12 @@ object SanctuaryCore {
                                 if (line.startsWith("data:")) {
                                     val jsonText = line.removePrefix("data:").trim()
                                     if (jsonText.startsWith("{")) {
-                                        handleSseJson(jsonText, myUid)
+                                        val becameReady = handleSseJson(appContext, serverUrl, jsonText, myUid, sseReady)
+                                        if (becameReady) sseReady = true
                                     }
                                 }
                             }
                         } else if (response.code == 401 || response.code == 403) {
-                            // SSE 返回 401 说明 Token 刚好到期，立即强制续期后重连
                             ensureValidToken(appContext, forceRenew = true)
                         }
                     }
@@ -626,14 +851,14 @@ object SanctuaryCore {
         sseJob = null
     }
 
-    private fun handleSseJson(raw: String, myUid: Int) {
+    private fun handleSseJson(context: Context, serverUrl: String, raw: String, myUid: Int, sseReady: Boolean): Boolean {
         try {
             val obj = JSONObject(raw)
             when (obj.optString("type")) {
+                "ready" -> return true
                 "users_snapshot" -> {
-                    val users = obj.optJSONArray("users")
-                    if (users != null) {
-                        parseUsersArray(users)
+                    obj.optJSONArray("users")?.let {
+                        parseUsersArray(it)
                         _userStateEvents.tryEmit(Unit)
                     }
                 }
@@ -652,6 +877,30 @@ object SanctuaryCore {
                         _userStateEvents.tryEmit(Unit)
                     }
                 }
+                "user_settings" -> {
+                    // 同步服务端保存的已读游标到本地！
+                    obj.optJSONArray("read_index_groups")?.let { arr ->
+                        for (i in 0 until arr.length()) {
+                            val item = arr.getJSONObject(i)
+                            val gid = item.optInt("gid", -1)
+                            val mid = item.optLong("mid", 0L)
+                            if (gid != -1 && mid > 0L) {
+                                setLastReadMidLocal(context, myUid, true, gid, mid)
+                            }
+                        }
+                    }
+                    obj.optJSONArray("read_index_users")?.let { arr ->
+                        for (i in 0 until arr.length()) {
+                            val item = arr.getJSONObject(i)
+                            val uid = item.optInt("uid", -1)
+                            val mid = item.optLong("mid", 0L)
+                            if (uid != -1 && mid > 0L) {
+                                setLastReadMidLocal(context, myUid, false, uid, mid)
+                            }
+                        }
+                    }
+                    _userStateEvents.tryEmit(Unit)
+                }
                 "chat" -> {
                     val mid = obj.optLong("mid", 0L)
                     val fromUid = obj.optInt("from_uid", -1)
@@ -659,12 +908,18 @@ object SanctuaryCore {
                     val detail = obj.optJSONObject("detail")
                     val contentType = detail?.optString("content_type", "text/plain") ?: "text/plain"
                     val content = parseMessagePreview(detail)
-                    val target = obj.optJSONObject("target") ?: return
+                    val target = obj.optJSONObject("target") ?: return false
 
-                    if (mid <= 0L || fromUid == -1 || content.isBlank()) return
+                    if (mid <= 0L || fromUid == -1 || content.isBlank()) return false
+                    updateGlobalMaxMid(context, myUid, mid)
 
                     if (target.has("gid")) {
                         val gid = target.getInt("gid")
+                        val senderName = if (fromUid == myUid) "我" else getDisplayName(fromUid)
+                        SanctuaryDb.getInstance(context).upsertSingleMessage(
+                            serverUrl, myUid, true, gid,
+                            ChatMessage(mid, fromUid, senderName, getAvatarUpdatedAt(fromUid), content, createdAt, fromUid == myUid, contentType)
+                        )
                         _incomingMessages.tryEmit(
                             IncomingChatEvent(
                                 mid = mid,
@@ -673,12 +928,18 @@ object SanctuaryCore {
                                 targetId = gid,
                                 content = content,
                                 contentType = contentType,
-                                createdAt = createdAt
+                                createdAt = createdAt,
+                                isRealtime = sseReady
                             )
                         )
                     } else if (target.has("uid")) {
                         val targetUid = target.getInt("uid")
                         val peerUid = if (fromUid == myUid) targetUid else fromUid
+                        val senderName = if (fromUid == myUid) "我" else getDisplayName(fromUid)
+                        SanctuaryDb.getInstance(context).upsertSingleMessage(
+                            serverUrl, myUid, false, peerUid,
+                            ChatMessage(mid, fromUid, senderName, getAvatarUpdatedAt(fromUid), content, createdAt, fromUid == myUid, contentType)
+                        )
                         _incomingMessages.tryEmit(
                             IncomingChatEvent(
                                 mid = mid,
@@ -687,7 +948,8 @@ object SanctuaryCore {
                                 targetId = peerUid,
                                 content = content,
                                 contentType = contentType,
-                                createdAt = createdAt
+                                createdAt = createdAt,
+                                isRealtime = sseReady
                             )
                         )
                     }
@@ -695,6 +957,7 @@ object SanctuaryCore {
             }
         } catch (_: Exception) {
         }
+        return false
     }
 
     private fun parseUsersArray(arr: JSONArray) {
@@ -724,7 +987,6 @@ object SanctuaryCore {
         )
     }
 
-    // 🖼️ 预热有头像的用户（受 avatarSemaphore 限流控制，不与列表请求抢隧道）
     fun prewarmAvatars(context: Context, serverUrl: String) {
         val appCtx = context.applicationContext
         userMap.values.filter { it.avatarUpdatedAt > 0L }.forEach { u ->
@@ -737,7 +999,6 @@ object SanctuaryCore {
         }
     }
 
-    // 🖼️ 加载用户或群组头像（内存 + 磁盘缩略图缓存 + In-Flight 请求去重合并）
     fun loadAvatar(
         context: Context,
         scope: CoroutineScope,

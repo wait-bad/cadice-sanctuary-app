@@ -2,6 +2,9 @@ package com.sanctuary.cadice
 
 import android.content.Context
 import android.graphics.Color
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
@@ -54,11 +57,9 @@ class ConversationAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
 
-        // 字体缩放适配
         holder.tvName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * fontScale)
         holder.tvLastMsg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * fontScale)
 
-        // 主题着色
         if (isDarkTheme) {
             holder.tvName.setTextColor(Color.parseColor("#F1F5F9"))
             holder.tvLastMsg.setTextColor(Color.parseColor("#94A3B8"))
@@ -83,9 +84,23 @@ class ConversationAdapter(
 
         holder.tvName.text = item.name
         holder.tvBadge.text = item.badge
-        holder.tvLastMsg.text = if (item.lastMsg.isNotEmpty()) item.lastMsg else item.description
-        holder.tvTime.text = SanctuaryCore.formatListTime(item.lastTime)
 
+        // 若存在未发送草稿，优先以珊瑚红高亮显示 [草稿]
+        if (item.draftText.isNotBlank()) {
+            val prefix = "[草稿] "
+            val ssb = SpannableStringBuilder(prefix).append(item.draftText.replace('\n', ' '))
+            ssb.setSpan(
+                ForegroundColorSpan(Color.parseColor("#F43F5E")),
+                0,
+                prefix.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            holder.tvLastMsg.text = ssb
+        } else {
+            holder.tvLastMsg.text = if (item.lastMsg.isNotEmpty()) item.lastMsg else item.description
+        }
+
+        holder.tvTime.text = SanctuaryCore.formatListTime(item.lastTime)
         holder.viewOnlineDot.visibility = if (!item.isGroup && item.isOnline) View.VISIBLE else View.GONE
 
         if (item.unreadCount > 0) {
@@ -124,7 +139,9 @@ class ChatAdapter(
     private val serverUrl: String,
     private val token: String,
     private val isDarkTheme: Boolean,
-    private val fontScale: Float = 1.0f
+    private val fontScale: Float = 1.0f,
+    private val onMessageLongClick: ((ChatMessage) -> Unit)? = null,
+    private val onRetryFailedClick: ((ChatMessage) -> Unit)? = null
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
@@ -154,9 +171,40 @@ class ChatAdapter(
         if (holder is RightViewHolder) {
             holder.tvContent.text = msg.content
             holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
-            holder.tvTime.text = timeText
             holder.tvTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * fontScale)
             holder.tvTime.setTextColor(Color.parseColor(if (isDarkTheme) "#64748B" else "#94A3B8"))
+
+            when (msg.syncStatus) {
+                ChatMessage.STATUS_SENDING -> {
+                    holder.tvTime.text = "$timeText · ⏳"
+                    holder.cardBubble.alpha = 0.85f
+                    holder.tvSendStatus.visibility = View.VISIBLE
+                    holder.tvSendStatus.text = "⏳"
+                    holder.tvSendStatus.setTextColor(Color.parseColor("#94A3B8"))
+                    holder.tvSendStatus.setOnClickListener(null)
+                }
+                ChatMessage.STATUS_FAILED -> {
+                    holder.tvTime.text = "$timeText · 未送达"
+                    holder.cardBubble.alpha = 0.90f
+                    holder.tvSendStatus.visibility = View.VISIBLE
+                    holder.tvSendStatus.text = "❗重发"
+                    holder.tvSendStatus.setTextColor(Color.parseColor("#EF4444"))
+                    holder.tvSendStatus.setOnClickListener {
+                        onRetryFailedClick?.invoke(msg)
+                    }
+                }
+                else -> {
+                    holder.tvTime.text = "$timeText ✓"
+                    holder.cardBubble.alpha = 1.0f
+                    holder.tvSendStatus.visibility = View.GONE
+                    holder.tvSendStatus.setOnClickListener(null)
+                }
+            }
+
+            holder.cardBubble.setOnLongClickListener {
+                onMessageLongClick?.invoke(msg)
+                true
+            }
             SanctuaryCore.loadAvatar(
                 context = context,
                 scope = scope,
@@ -176,6 +224,10 @@ class ChatAdapter(
             holder.tvSender.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * fontScale)
             holder.tvTime.text = timeText
             holder.tvTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * fontScale)
+            holder.cardBubble.setOnLongClickListener {
+                onMessageLongClick?.invoke(msg)
+                true
+            }
 
             if (isDarkTheme) {
                 holder.cardBubble.setCardBackgroundColor(Color.parseColor("#1E293B"))
@@ -221,6 +273,8 @@ class ChatAdapter(
         val tvAvatar: TextView = view.findViewById(R.id.tv_avatar_right)
         val ivAvatar: ImageView = view.findViewById(R.id.iv_avatar_right)
         val tvTime: TextView = view.findViewById(R.id.tv_time_right)
+        val tvSendStatus: TextView = view.findViewById(R.id.tv_send_status)
+        val cardBubble: MaterialCardView = view.findViewById(R.id.card_bubble_right)
         val tvContent: TextView = view.findViewById(R.id.tv_content_right)
     }
 }

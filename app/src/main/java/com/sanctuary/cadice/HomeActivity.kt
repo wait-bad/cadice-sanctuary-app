@@ -37,7 +37,6 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var conversationAdapter: ConversationAdapter
     private lateinit var contactAdapter: ConversationAdapter
 
-    private var lastSyncCompletedAt: Long = 0L
     private var activeIsGroup: Boolean? = null
     private var activeTargetId: Int = -1
 
@@ -63,7 +62,6 @@ class HomeActivity : AppCompatActivity() {
         SanctuaryCore.activeToken = token
         drawerLayout = findViewById(R.id.drawer_layout)
 
-        // 返回键若侧边栏打开，先关闭侧边栏
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
@@ -75,7 +73,6 @@ class HomeActivity : AppCompatActivity() {
             }
         })
 
-        // 顶部头像/标题点击唤出 QQ 侧边栏
         findViewById<View>(R.id.card_my_avatar).setOnClickListener {
             drawerLayout.openDrawer(GravityCompat.START)
         }
@@ -87,11 +84,9 @@ class HomeActivity : AppCompatActivity() {
         val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
         tvSubtitle.text = "🟢 $myName · $cleanHost"
 
-        // 侧边栏个人名片信息
         findViewById<TextView>(R.id.tv_drawer_name).text = myName
         findViewById<TextView>(R.id.tv_drawer_server).text = "🌐 $cleanHost (UID: $myUid)"
 
-        // 侧边栏日夜间全局主题切换
         findViewById<View>(R.id.btn_drawer_theme).setOnClickListener {
             isDarkTheme = !isDarkTheme
             prefs.edit().putBoolean(SanctuaryCore.KEY_DARK_THEME, isDarkTheme).apply()
@@ -100,18 +95,15 @@ class HomeActivity : AppCompatActivity() {
             contactAdapter.updateStyle(isDarkTheme, fontScale, serverUrl, SanctuaryCore.activeToken.ifEmpty { token })
         }
 
-        // 侧边栏全屏设置入口
         findViewById<View>(R.id.btn_drawer_settings).setOnClickListener {
             drawerLayout.closeDrawer(GravityCompat.START)
             startActivity(Intent(this, SettingsActivity::class.java))
         }
 
-        // 顶部刷新按钮
         findViewById<MaterialButton>(R.id.btn_home_refresh).setOnClickListener {
             loadData(showSpinner = true)
         }
 
-        // 侧边栏退出账号
         findViewById<MaterialButton>(R.id.btn_home_logout).setOnClickListener {
             logoutToLogin("已退出登录")
         }
@@ -152,14 +144,13 @@ class HomeActivity : AppCompatActivity() {
         setupNavigation()
         observeRealtimeEvents()
 
-        // 启动自愈续期 SSE
         SanctuaryCore.startSse(this, serverUrl, myUid)
 
-        // 本地快照 0ms 秒开首屏，再后台拉取最新数据
-        val cached = SanctuaryCore.loadHomeSnapshot(this)
+        // 先 0ms 秒开本地快照（并根据持久化的 lastReadMid 校准未读数）
+        val cached = SanctuaryCore.loadHomeSnapshot(this, serverUrl, myUid)
         if (cached != null) {
             conversationList.clear()
-            conversationList.addAll(cached.first)
+            conversationList.addAll(reconcileUnreadWithLocalCursor(cached.first))
             contactList.clear()
             contactList.addAll(cached.second)
             updateMyAvatars()
@@ -176,11 +167,22 @@ class HomeActivity : AppCompatActivity() {
         super.onResume()
         activeIsGroup = null
         activeTargetId = -1
-        // 从设置页返回时同步最新字体大小、主题和头像
+
         val newDark = prefs.getBoolean(SanctuaryCore.KEY_DARK_THEME, true)
         val newFontScale = SanctuaryCore.getFontScale(prefs)
         val latestToken = prefs.getString(SanctuaryCore.KEY_TOKEN, token) ?: token
         token = latestToken
+
+        // 从聊天室返回时重新校准一次本地已读游标，保证未读红点绝不会残留！
+        val reconciled = reconcileUnreadWithLocalCursor(conversationList)
+        val unreadChanged = reconciled != conversationList
+        if (unreadChanged) {
+            conversationList.clear()
+            conversationList.addAll(reconciled)
+            conversationAdapter.notifyDataSetChanged()
+            SanctuaryCore.saveHomeSnapshot(this, serverUrl, myUid, conversationList)
+        }
+
         if (newDark != isDarkTheme || newFontScale != fontScale) {
             isDarkTheme = newDark
             fontScale = newFontScale
@@ -195,6 +197,20 @@ class HomeActivity : AppCompatActivity() {
         super.onDestroy()
         if (isFinishing) {
             SanctuaryCore.stopSse()
+        }
+    }
+
+    private fun reconcileUnreadWithLocalCursor(items: List<ConversationItem>): List<ConversationItem> {
+        val drafts = SanctuaryCore.getAllDrafts(this, serverUrl, myUid)
+        return items.map { item ->
+            val readMid = SanctuaryCore.getLastReadMid(this, myUid, item.isGroup, item.id)
+            val draft = drafts[Pair(item.isGroup, item.id)] ?: ""
+            val fixedUnread = if (item.lastMid > 0L && item.lastMid <= readMid && item.unreadCount > 0) 0 else item.unreadCount
+            if (fixedUnread != item.unreadCount || draft != item.draftText) {
+                item.copy(unreadCount = fixedUnread, draftText = draft)
+            } else {
+                item
+            }
         }
     }
 
@@ -216,10 +232,18 @@ class HomeActivity : AppCompatActivity() {
         activeIsGroup = item.isGroup
         activeTargetId = item.id
 
+        // 立刻标记该会话已读并同步本地游标 + 服务器 read-index
         val idx = conversationList.indexOfFirst { it.isGroup == item.isGroup && it.id == item.id }
-        if (idx != -1 && conversationList[idx].unreadCount > 0) {
-            conversationList[idx] = conversationList[idx].copy(unreadCount = 0)
-            conversationAdapter.notifyItemChanged(idx)
+        if (idx != -1) {
+            val cur = conversationList[idx]
+            if (cur.lastMid > 0L) {
+                SanctuaryCore.markConversationRead(this, serverUrl, myUid, item.isGroup, item.id, cur.lastMid)
+            }
+            if (cur.unreadCount > 0) {
+                conversationList[idx] = cur.copy(unreadCount = 0)
+                conversationAdapter.notifyItemChanged(idx)
+                SanctuaryCore.saveHomeSnapshot(this, serverUrl, myUid, conversationList)
+            }
         }
 
         val intent = Intent(this, ChatActivity::class.java).apply {
@@ -238,7 +262,6 @@ class HomeActivity : AppCompatActivity() {
         val tvContactsHeader = findViewById<TextView>(R.id.tv_contacts_header)
         val cardMyAvatar = findViewById<MaterialCardView>(R.id.card_my_avatar)
 
-        // 侧边栏元素
         val drawerContainer = findViewById<LinearLayout>(R.id.drawer_container)
         val drawerHeader = findViewById<LinearLayout>(R.id.drawer_header)
         val tvDrawerName = findViewById<TextView>(R.id.tv_drawer_name)
@@ -410,8 +433,21 @@ class HomeActivity : AppCompatActivity() {
                         val online = SanctuaryCore.isUserOnline(item.id)
                         val avTs = SanctuaryCore.getAvatarUpdatedAt(item.id)
                         val name = SanctuaryCore.getDisplayName(item.id)
-                        if (item.isOnline != online || item.avatarUpdatedAt != avTs || item.name != name) {
-                            conversationList[i] = item.copy(name = name, isOnline = online, avatarUpdatedAt = avTs)
+                        val readMid = SanctuaryCore.getLastReadMid(this@HomeActivity, myUid, false, item.id)
+                        val newUnread = if (item.lastMid > 0L && item.lastMid <= readMid) 0 else item.unreadCount
+                        if (item.isOnline != online || item.avatarUpdatedAt != avTs || item.name != name || item.unreadCount != newUnread) {
+                            conversationList[i] = item.copy(
+                                name = name,
+                                isOnline = online,
+                                avatarUpdatedAt = avTs,
+                                unreadCount = newUnread
+                            )
+                            convChanged = true
+                        }
+                    } else {
+                        val readMid = SanctuaryCore.getLastReadMid(this@HomeActivity, myUid, true, item.id)
+                        if (item.lastMid > 0L && item.lastMid <= readMid && item.unreadCount > 0) {
+                            conversationList[i] = item.copy(unreadCount = 0)
                             convChanged = true
                         }
                     }
@@ -430,21 +466,34 @@ class HomeActivity : AppCompatActivity() {
                 } else {
                     event.content
                 }
+
                 val isCurrentlyOpen = (activeIsGroup == event.isGroup && activeTargetId == event.targetId)
-                val isNewRealtime = event.createdAt > lastSyncCompletedAt &&
-                    event.fromUid != myUid && !isCurrentlyOpen
+                val lastReadMid = SanctuaryCore.getLastReadMid(this@HomeActivity, myUid, event.isGroup, event.targetId)
+
+                // 核心修复：只有真正高于持久化已读游标 (mid > lastReadMid)、且非自己发送、且未打开该会话的消息，才累加未读！
+                // 若是重连回放 (isRealtime=false) 且本地尚无任何已读基准 (lastReadMid==0)，也不触发假未读！
+                val shouldIncrementUnread = event.fromUid != myUid && !isCurrentlyOpen &&
+                    event.mid > lastReadMid && (event.isRealtime || lastReadMid > 0L)
+
+                if (isCurrentlyOpen) {
+                    SanctuaryCore.markConversationRead(
+                        this@HomeActivity, serverUrl, myUid, event.isGroup, event.targetId, event.mid
+                    )
+                }
 
                 if (idx != -1) {
                     val old = conversationList[idx]
-                    if (event.createdAt >= old.lastTime) {
+                    if (event.mid > old.lastMid) {
                         val updated = old.copy(
                             lastMsg = preview,
                             lastTime = event.createdAt,
-                            unreadCount = if (isNewRealtime) old.unreadCount + 1 else old.unreadCount
+                            lastMid = event.mid,
+                            unreadCount = if (shouldIncrementUnread) old.unreadCount + 1 else old.unreadCount
                         )
                         conversationList.removeAt(idx)
                         conversationList.add(0, updated)
                         conversationAdapter.notifyDataSetChanged()
+                        SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, conversationList)
                     }
                 } else {
                     val name = if (event.isGroup) "群聊 #${event.targetId}" else SanctuaryCore.getDisplayName(event.targetId)
@@ -455,7 +504,8 @@ class HomeActivity : AppCompatActivity() {
                         description = if (event.isGroup) "群聊频道" else "VoceChat 成员",
                         lastMsg = preview,
                         lastTime = event.createdAt,
-                        unreadCount = if (isNewRealtime) 1 else 0,
+                        lastMid = event.mid,
+                        unreadCount = if (shouldIncrementUnread) 1 else 0,
                         avatarUpdatedAt = if (event.isGroup) 0L else SanctuaryCore.getAvatarUpdatedAt(event.targetId),
                         isOnline = if (event.isGroup) false else SanctuaryCore.isUserOnline(event.targetId),
                         badge = if (event.isGroup) "群聊" else "成员"
@@ -463,6 +513,7 @@ class HomeActivity : AppCompatActivity() {
                     conversationList.add(0, newItem)
                     conversationAdapter.notifyItemInserted(0)
                     findViewById<TextView>(R.id.tv_empty_chats).visibility = View.GONE
+                    SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, conversationList)
                 }
             }
         }
@@ -510,7 +561,6 @@ class HomeActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                // 阶段一：自动续期 Token 并并发拉取基础名录
                 val (baseConvs, contacts) = SanctuaryCore.fetchBaseDirectory(
                     context = this@HomeActivity,
                     serverUrl = serverUrl,
@@ -520,10 +570,11 @@ class HomeActivity : AppCompatActivity() {
                 val oldMap = conversationList.associateBy { Pair(it.isGroup, it.id) }
                 val mergedBase = baseConvs.map { item ->
                     val prev = oldMap[Pair(item.isGroup, item.id)]
-                    if (prev != null && prev.lastTime > item.lastTime) {
+                    if (prev != null && (prev.lastMid > item.lastMid || prev.lastTime > item.lastTime)) {
                         item.copy(
                             lastMsg = prev.lastMsg,
                             lastTime = prev.lastTime,
+                            lastMid = prev.lastMid,
                             unreadCount = prev.unreadCount
                         )
                     } else {
@@ -538,7 +589,7 @@ class HomeActivity : AppCompatActivity() {
 
                 if (mergedBase.isNotEmpty()) {
                     conversationList.clear()
-                    conversationList.addAll(mergedBase)
+                    conversationList.addAll(reconcileUnreadWithLocalCursor(mergedBase))
                     contactList.clear()
                     contactList.addAll(contacts)
                 }
@@ -555,23 +606,19 @@ class HomeActivity : AppCompatActivity() {
                     tvEmpty.visibility = View.VISIBLE
                 }
 
-                // 阶段二：受限流控制的并发摘要补全（最多 3 并发，绝不把隧道挤爆！）
                 val hydrated = SanctuaryCore.hydrateLatestPreviews(
                     context = this@HomeActivity,
                     serverUrl = serverUrl,
+                    myUid = myUid,
                     items = conversationList.toList()
                 )
-                val unreadMap = conversationList.associate { Pair(it.isGroup, it.id) to it.unreadCount }
-                val finalConvs = hydrated.map { item ->
-                    item.copy(unreadCount = unreadMap[Pair(item.isGroup, item.id)] ?: item.unreadCount)
-                }
+                val finalConvs = reconcileUnreadWithLocalCursor(hydrated)
 
                 conversationList.clear()
                 conversationList.addAll(finalConvs)
-                lastSyncCompletedAt = System.currentTimeMillis()
                 conversationAdapter.notifyDataSetChanged()
 
-                SanctuaryCore.saveHomeSnapshot(this@HomeActivity, finalConvs, contacts)
+                SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, finalConvs)
             } catch (e: Exception) {
                 Toast.makeText(this@HomeActivity, "刷新失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
