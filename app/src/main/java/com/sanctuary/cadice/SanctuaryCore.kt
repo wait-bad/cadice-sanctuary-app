@@ -1174,8 +1174,8 @@ object SanctuaryCore {
                                 val source = response.body?.source()
                                 while (isActive && source != null && !source.exhausted()) {
                                     val line = source.readUtf8Line() ?: break
+                                    val now = System.currentTimeMillis()
                                     lastActivityAt.set(now)
-                                    lastSsePacketAt = now
                                     if (line.startsWith("data:")) {
                                         val jsonText = line.removePrefix("data:").trim()
                                         if (jsonText.startsWith("{")) {

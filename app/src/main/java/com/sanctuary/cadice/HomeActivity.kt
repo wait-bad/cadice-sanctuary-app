@@ -49,6 +49,7 @@ class HomeActivity : AppCompatActivity() {
     private var loadDataJob: Job? = null
 
     private var activeIsGroup: Boolean? = null
+    private var activeTargetId: Int = -1
     private val requestNotifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
