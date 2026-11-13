@@ -34,10 +34,7 @@ import java.util.concurrent.TimeUnit
 class MainActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .build()
+    private val client = SanctuaryCore.httpClient
 
     private var isDarkTheme = true
     private var isPasswordVisible = false
@@ -62,10 +59,11 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 1. 若已有登录态，直接秒跳主界面！
+        // 1. 若已有完整登录态（token + uid + serverUrl），直接秒跳主界面！
         val existingToken = prefs.getString(KEY_TOKEN, null)
         val existingUid = prefs.getInt(KEY_USER_UID, -1)
-        if (!existingToken.isNullOrEmpty() && existingUid != -1) {
+        val existingServer = prefs.getString(KEY_SERVER_URL, null)
+        if (!existingToken.isNullOrEmpty() && existingUid != -1 && !existingServer.isNullOrEmpty()) {
             goToHome()
             return
         }
@@ -169,14 +167,14 @@ class MainActivity : AppCompatActivity() {
                         val name = userObj.getString("name")
                         val isAdmin = userObj.optBoolean("is_admin", false)
 
-                        // 永久安全保存凭证
+                        // 永久安全保存凭证（包含当前服务器地址，杜绝跳转校验不一致）
                         prefs.edit()
+                            .putString(KEY_SERVER_URL, serverUrl)
                             .putString(KEY_TOKEN, token)
                             .putInt(KEY_USER_UID, uid)
                             .putString(KEY_USER_NAME, name)
                             .putBoolean(KEY_IS_ADMIN, isAdmin)
                             .apply()
-
                         Toast.makeText(this@MainActivity, "登录成功，欢迎 $name！🌸", Toast.LENGTH_SHORT).show()
                         goToHome()
                     } else {

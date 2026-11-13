@@ -48,6 +48,8 @@ class HomeActivity : AppCompatActivity() {
         isDarkTheme = prefs.getBoolean("dark_theme", true)
 
         if (token.isEmpty() || serverUrl.isEmpty() || myUid == -1) {
+            // 清理可能残缺的登录态，彻底杜绝与 MainActivity 互踢死循环
+            prefs.edit().remove("token").remove("user_uid").apply()
             startActivity(Intent(this, MainActivity::class.java))
             finish()
             return

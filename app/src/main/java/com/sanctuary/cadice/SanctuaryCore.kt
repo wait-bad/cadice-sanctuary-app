@@ -24,14 +24,26 @@ import java.util.concurrent.TimeUnit
 object SanctuaryCore {
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            val req = chain.request().newBuilder()
+                .header("User-Agent", "VioletIM/1.4 (Android; Mobile)")
+                .build()
+            chain.proceed(req)
+        }
         .build()
 
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            val req = chain.request().newBuilder()
+                .header("User-Agent", "VioletIM/1.4 (Android; Mobile)")
+                .build()
+            chain.proceed(req)
+        }
         .build()
 
     val userMap = ConcurrentHashMap<Int, UserProfile>()
