@@ -1,17 +1,21 @@
 package com.sanctuary.cadice
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.GravityCompat
 import androidx.core.view.WindowCompat
-import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -40,6 +44,9 @@ class HomeActivity : AppCompatActivity() {
     private var activeIsGroup: Boolean? = null
     private var activeTargetId: Int = -1
 
+    private val requestNotifPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_home)
@@ -100,10 +107,13 @@ class HomeActivity : AppCompatActivity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
 
+        findViewById<MaterialButton>(R.id.btn_home_search).setOnClickListener {
+            startActivity(Intent(this, SearchActivity::class.java))
+        }
+
         findViewById<MaterialButton>(R.id.btn_home_refresh).setOnClickListener {
             loadData(showSpinner = true)
         }
-
         findViewById<MaterialButton>(R.id.btn_home_logout).setOnClickListener {
             logoutToLogin("已退出登录")
         }
@@ -144,9 +154,14 @@ class HomeActivity : AppCompatActivity() {
         setupNavigation()
         observeRealtimeEvents()
 
+        NotificationHelper.ensureChannels(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         SanctuaryCore.startSse(this, serverUrl, myUid)
-
-        // 先 0ms 秒开本地快照（并根据持久化的 lastReadMid 校准未读数）
+        SanctuaryKeepAliveService.syncWithPreference(this)
         val cached = SanctuaryCore.loadHomeSnapshot(this, serverUrl, myUid)
         if (cached != null) {
             conversationList.clear()
@@ -195,7 +210,7 @@ class HomeActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (isFinishing) {
+        if (isFinishing && !prefs.getBoolean(SanctuaryCore.KEY_KEEP_ALIVE, false)) {
             SanctuaryCore.stopSse()
         }
     }
@@ -206,8 +221,9 @@ class HomeActivity : AppCompatActivity() {
             val readMid = SanctuaryCore.getLastReadMid(this, myUid, item.isGroup, item.id)
             val draft = drafts[Pair(item.isGroup, item.id)] ?: ""
             val fixedUnread = if (item.lastMid > 0L && item.lastMid <= readMid && item.unreadCount > 0) 0 else item.unreadCount
-            if (fixedUnread != item.unreadCount || draft != item.draftText) {
-                item.copy(unreadCount = fixedUnread, draftText = draft)
+            val liveOnline = if (item.isGroup) false else SanctuaryCore.isUserOnline(item.id)
+            if (fixedUnread != item.unreadCount || draft != item.draftText || liveOnline != item.isOnline) {
+                item.copy(unreadCount = fixedUnread, draftText = draft, isOnline = liveOnline)
             } else {
                 item
             }
@@ -406,6 +422,19 @@ class HomeActivity : AppCompatActivity() {
             }
         }
 
+        lifecycleScope.launch {
+            val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
+            val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
+            SanctuaryCore.connectionStateEvents.collect { connected ->
+                if (connected) {
+                    tvSubtitle.text = "🟢 $myName · $cleanHost"
+                    tvSubtitle.setTextColor(Color.parseColor("#10B981"))
+                } else {
+                    tvSubtitle.text = "🟠 网络重连中 · $cleanHost"
+                    tvSubtitle.setTextColor(Color.parseColor("#F59E0B"))
+                }
+            }
+        }
         lifecycleScope.launch {
             SanctuaryCore.userStateEvents.collect {
                 updateMyAvatars()

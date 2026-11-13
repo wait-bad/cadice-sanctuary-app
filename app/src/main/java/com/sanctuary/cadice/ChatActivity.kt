@@ -4,29 +4,34 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
+import kotlinx.coroutines.withContext
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import java.util.concurrent.atomic.AtomicLong
 
@@ -49,12 +54,26 @@ class ChatActivity : AppCompatActivity() {
     private val loadedMids = HashSet<Long>()
     private lateinit var chatAdapter: ChatAdapter
     private lateinit var rvMessages: RecyclerView
+    private lateinit var layoutManager: LinearLayoutManager
     private lateinit var etMessage: EditText
+
+    private lateinit var cardScrollBottom: MaterialCardView
+    private lateinit var tvScrollBottom: TextView
+    private lateinit var layoutReplyPreview: LinearLayout
+    private lateinit var tvReplyPreview: TextView
 
     private var isLoadingOlder = false
     private var hasMoreOlder = true
     private var draftSaveJob: Job? = null
     private val tempSeq = AtomicLong(0L)
+    private var replyingToMessage: ChatMessage? = null
+    private var unreadNewBelowCount = 0
+
+    private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            sendImageOptimistic(uri)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,42 +91,79 @@ class ChatActivity : AppCompatActivity() {
         targetId = intent.getIntExtra("target_id", -1)
         targetName = intent.getStringExtra("target_name") ?: "会话"
 
+        cardScrollBottom = findViewById(R.id.card_scroll_bottom)
+        tvScrollBottom = findViewById(R.id.tv_scroll_bottom)
+        layoutReplyPreview = findViewById(R.id.layout_reply_preview)
+        tvReplyPreview = findViewById(R.id.tv_reply_preview)
+
         applyTheme()
 
-        val btnBack = findViewById<MaterialButton>(R.id.btn_back)
-        btnBack.setOnClickListener { finish() }
-
-        val tvTitle = findViewById<TextView>(R.id.tv_chat_title)
-        tvTitle.text = targetName
+        findViewById<MaterialButton>(R.id.btn_back).setOnClickListener { finish() }
+        findViewById<TextView>(R.id.tv_chat_title).text = targetName
 
         val tvSubtitle = findViewById<TextView>(R.id.tv_chat_subtitle)
         tvSubtitle.text = if (isGroup) {
-            "群组频道 · 长按气泡可复制或删除"
+            "群组频道 · 右滑引用 · 长按操作"
         } else {
             val online = SanctuaryCore.isUserOnline(targetId)
-            if (online) "🟢 当前在线 · 长按气泡可复制或删除" else "⚪ 离线 · 长按气泡可复制或删除"
+            if (online) "🟢 当前在线 · 右滑引用 · 长按操作" else "⚪ 离线 · 右滑引用 · 长按操作"
         }
 
         rvMessages = findViewById(R.id.rv_messages)
-        val layoutManager = LinearLayoutManager(this).apply {
+        layoutManager = LinearLayoutManager(this).apply {
             stackFromEnd = true
         }
         rvMessages.layoutManager = layoutManager
         chatAdapter = ChatAdapter(
             context = this,
             scope = lifecycleScope,
-            messages = messageList,
             serverUrl = serverUrl,
             token = SanctuaryCore.activeToken.ifEmpty { token },
             isDarkTheme = isDarkTheme,
             fontScale = fontScale,
             onMessageLongClick = { msg -> showMessageActionsDialog(msg) },
-            onRetryFailedClick = { failedMsg -> retryFailedMessage(failedMsg) }
+            onRetryFailedClick = { failedMsg -> retryFailedMessage(failedMsg) },
+            onImageClick = { imgMsg ->
+                startActivity(Intent(this, ImageViewerActivity::class.java).apply {
+                    putExtra("server_url", serverUrl)
+                    putExtra("file_path", imgMsg.filePath)
+                    putExtra("local_uri", imgMsg.localFileUri)
+                })
+            }
         )
         rvMessages.adapter = chatAdapter
 
+        ItemTouchHelper(SwipeReplyCallback(chatAdapter) { msg ->
+            startReplyingTo(msg)
+        }).attachToRecyclerView(rvMessages)
+
+        cardScrollBottom.setOnClickListener {
+            unreadNewBelowCount = 0
+            cardScrollBottom.visibility = View.GONE
+            val total = chatAdapter.itemCount
+            if (total > 0) {
+                rvMessages.smoothScrollToPosition(total - 1)
+            }
+        }
+
+        findViewById<MaterialButton>(R.id.btn_cancel_reply).setOnClickListener {
+            clearReplyState()
+        }
+
         rvMessages.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                val total = chatAdapter.itemCount
+                val lastVisible = layoutManager.findLastVisibleItemPosition()
+                val nearBottom = total == 0 || lastVisible >= total - 3
+                if (nearBottom) {
+                    unreadNewBelowCount = 0
+                    if (cardScrollBottom.visibility == View.VISIBLE) {
+                        cardScrollBottom.visibility = View.GONE
+                    }
+                } else if (total - 1 - lastVisible >= 5) {
+                    updateScrollBottomBadge()
+                }
+
                 if (dy < 0 && !isLoadingOlder && hasMoreOlder && messageList.isNotEmpty()) {
                     val firstVisible = layoutManager.findFirstVisibleItemPosition()
                     if (firstVisible <= 2) {
@@ -121,17 +177,21 @@ class ChatActivity : AppCompatActivity() {
         etMessage.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
         setupDraftPersistence()
 
-        val btnSend = findViewById<MaterialButton>(R.id.btn_send)
-        btnSend.setOnClickListener {
+        findViewById<MaterialButton>(R.id.btn_pick_image).setOnClickListener {
+            pickImageLauncher.launch("image/*")
+        }
+
+        findViewById<MaterialButton>(R.id.btn_send).setOnClickListener {
             val text = etMessage.text.toString().trim()
             if (text.isNotEmpty()) {
                 etMessage.setText("")
                 SanctuaryCore.deleteDraft(this, serverUrl, myUid, isGroup, targetId)
-                sendMessageOptimistic(text)
+                val replyTarget = replyingToMessage
+                clearReplyState()
+                sendMessageOptimistic(text, replyTarget)
             }
         }
 
-        // 1. 0ms 秒加载本地永久 SQLite 聊天记录
         val localCached = SanctuaryCore.loadLocalChatPage(this, serverUrl, myUid, isGroup, targetId, Long.MAX_VALUE, 50)
         if (localCached.isNotEmpty()) {
             messageList.addAll(localCached)
@@ -140,21 +200,24 @@ class ChatActivity : AppCompatActivity() {
                     loadedMids.add(it.mid)
                 }
             }
-            chatAdapter.notifyDataSetChanged()
-            rvMessages.scrollToPosition(messageList.size - 1)
+            submitRows(scrollToBottom = true)
             localCached.lastOrNull { it.syncStatus == ChatMessage.STATUS_SENT }?.let {
                 SanctuaryCore.markConversationRead(this, serverUrl, myUid, isGroup, targetId, it.mid)
             }
         }
 
-        // 2. 增量同步最新消息 (只拉 after={localMaxSentMid})
         loadIncrementalHistory()
         observeRealtimeMessages()
     }
 
+    override fun onResume() {
+        super.onResume()
+        NotificationHelper.setCurrentRoom(this, isGroup, targetId)
+    }
+
     override fun onPause() {
         super.onPause()
-        // 离开页面或切后台前立刻把当前草稿落盘，绝不丢失一个字
+        NotificationHelper.clearCurrentRoom()
         draftSaveJob?.cancel()
         if (::etMessage.isInitialized) {
             val currentText = etMessage.text.toString()
@@ -164,6 +227,57 @@ class ChatActivity : AppCompatActivity() {
                 SanctuaryCore.saveDraft(this, serverUrl, myUid, isGroup, targetId, currentText)
             }
         }
+    }
+
+    private fun isUserNearBottom(): Boolean {
+        val total = chatAdapter.itemCount
+        if (total == 0) return true
+        val lastVisible = layoutManager.findLastVisibleItemPosition()
+        return lastVisible == RecyclerView.NO_POSITION || lastVisible >= total - 3
+    }
+
+    private fun updateScrollBottomBadge() {
+        tvScrollBottom.text = if (unreadNewBelowCount > 0) "↓ ${unreadNewBelowCount}条新消息" else "↓ 回到底部"
+        cardScrollBottom.visibility = View.VISIBLE
+    }
+
+    private fun buildChatRows(messages: List<ChatMessage>): List<ChatListRow> {
+        val rows = ArrayList<ChatListRow>(messages.size + 4)
+        var lastDayKey = ""
+        for (msg in messages) {
+            val (dayKey, dayLabel) = SanctuaryCore.formatDayKeyAndLabel(msg.createdAt)
+            if (dayKey != lastDayKey) {
+                lastDayKey = dayKey
+                rows.add(ChatListRow.DateDivider(dayKey, dayLabel))
+            }
+            rows.add(ChatListRow.MessageRow(msg))
+        }
+        return rows
+    }
+
+    private fun submitRows(scrollToBottom: Boolean, onCommitted: (() -> Unit)? = null) {
+        val rows = buildChatRows(messageList)
+        chatAdapter.submitList(rows) {
+            if (scrollToBottom && rows.isNotEmpty()) {
+                rvMessages.scrollToPosition(rows.size - 1)
+                unreadNewBelowCount = 0
+                cardScrollBottom.visibility = View.GONE
+            }
+            onCommitted?.invoke()
+        }
+    }
+
+    private fun startReplyingTo(msg: ChatMessage) {
+        replyingToMessage = msg
+        val sender = if (msg.isSelf) myName else msg.fromName
+        tvReplyPreview.text = "回复 $sender: ${msg.content.replace('\n', ' ')}"
+        layoutReplyPreview.visibility = View.VISIBLE
+        etMessage.requestFocus()
+    }
+
+    private fun clearReplyState() {
+        replyingToMessage = null
+        layoutReplyPreview.visibility = View.GONE
     }
 
     private fun setupDraftPersistence() {
@@ -213,6 +327,8 @@ class ChatActivity : AppCompatActivity() {
             chatRoot.setBackgroundColor(bg)
             topBar.setBackgroundColor(bar)
             bottomBar.setBackgroundColor(bar)
+            layoutReplyPreview.setBackgroundColor(bar)
+            tvReplyPreview.setTextColor(Color.parseColor("#CBD5E1"))
             btnBack.setTextColor(Color.parseColor("#F8FAFC"))
             tvTitle.setTextColor(Color.parseColor("#F8FAFC"))
             tvSubtitle.setTextColor(Color.parseColor("#94A3B8"))
@@ -231,6 +347,8 @@ class ChatActivity : AppCompatActivity() {
             chatRoot.setBackgroundColor(bg)
             topBar.setBackgroundColor(bar)
             bottomBar.setBackgroundColor(bar)
+            layoutReplyPreview.setBackgroundColor(bar)
+            tvReplyPreview.setTextColor(Color.parseColor("#475569"))
             btnBack.setTextColor(Color.parseColor("#0F172A"))
             tvTitle.setTextColor(Color.parseColor("#0F172A"))
             tvSubtitle.setTextColor(Color.parseColor("#64748B"))
@@ -252,6 +370,7 @@ class ChatActivity : AppCompatActivity() {
                 "📋 复制消息内容"
             )
             else -> arrayOf(
+                "↩️ 引用回复",
                 "📋 复制消息内容",
                 "🗑️ 从服务器删除此条消息",
                 "🧹 清空本机此会话缓存记录"
@@ -270,13 +389,14 @@ class ChatActivity : AppCompatActivity() {
                     copyText(msg.content)
                 } else {
                     when (which) {
-                        0 -> copyText(msg.content)
-                        1 -> confirmDeleteServerMessage(msg)
-                        2 -> {
+                        0 -> startReplyingTo(msg)
+                        1 -> copyText(msg.content)
+                        2 -> confirmDeleteServerMessage(msg)
+                        3 -> {
                             SanctuaryCore.clearLocalChatHistory(this, serverUrl, myUid, isGroup, targetId)
                             messageList.clear()
                             loadedMids.clear()
-                            chatAdapter.notifyDataSetChanged()
+                            submitRows(scrollToBottom = false)
                             Toast.makeText(this, "已清空本地缓存（未删除服务器数据）", Toast.LENGTH_SHORT).show()
                         }
                     }
@@ -295,7 +415,7 @@ class ChatActivity : AppCompatActivity() {
         val idx = messageList.indexOfFirst { it.mid == msg.mid }
         if (idx != -1) {
             messageList.removeAt(idx)
-            chatAdapter.notifyItemRemoved(idx)
+            submitRows(scrollToBottom = false)
             SanctuaryCore.deleteLocalChatMessage(this, serverUrl, myUid, isGroup, targetId, msg.mid)
         }
     }
@@ -313,7 +433,7 @@ class ChatActivity : AppCompatActivity() {
                         if (idx != -1) {
                             messageList.removeAt(idx)
                             loadedMids.remove(msg.mid)
-                            chatAdapter.notifyItemRemoved(idx)
+                            submitRows(scrollToBottom = false)
                             SanctuaryCore.deleteLocalChatMessage(this@ChatActivity, serverUrl, myUid, isGroup, targetId, msg.mid)
                         }
                     }
@@ -323,16 +443,26 @@ class ChatActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun resolveReplyPreviewText(replyToMid: Long): String {
+        if (replyToMid <= 0L) return ""
+        val inMem = messageList.firstOrNull { it.mid == replyToMid }
+        if (inMem != null) {
+            val sender = if (inMem.isSelf) myName else inMem.fromName
+            return "$sender: ${inMem.content}"
+        }
+        return SanctuaryDb.getInstance(this).getMessageContentByMid(serverUrl, myUid, isGroup, targetId, replyToMid)
+    }
+
     private fun observeRealtimeMessages() {
         lifecycleScope.launch {
             SanctuaryCore.incomingMessages.collect { event ->
                 if (event.isGroup == isGroup && event.targetId == targetId) {
                     if (loadedMids.contains(event.mid)) return@collect
 
-                    // 若是我刚乐观发出正在等待回执的消息，原地升格为正式服务器消息，避免出现两条重复气泡！
                     if (event.fromUid == myUid) {
                         val pendingIdx = messageList.indexOfFirst {
-                            it.isSelf && it.syncStatus == ChatMessage.STATUS_SENDING && it.content == event.content
+                            it.isSelf && it.syncStatus == ChatMessage.STATUS_SENDING &&
+                                (it.content == event.content || (it.isImageMessage && event.contentType == "vocechat/file"))
                         }
                         if (pendingIdx != -1) {
                             val pending = messageList[pendingIdx]
@@ -340,10 +470,11 @@ class ChatActivity : AppCompatActivity() {
                             val realMsg = pending.copy(
                                 mid = event.mid,
                                 createdAt = event.createdAt,
-                                syncStatus = ChatMessage.STATUS_SENT
+                                syncStatus = ChatMessage.STATUS_SENT,
+                                filePath = event.filePath.ifBlank { pending.filePath }
                             )
                             messageList[pendingIdx] = realMsg
-                            chatAdapter.notifyItemChanged(pendingIdx)
+                            submitRows(scrollToBottom = isUserNearBottom())
                             SanctuaryCore.promotePendingMessage(
                                 this@ChatActivity, serverUrl, myUid, isGroup, targetId, pending.mid, realMsg
                             )
@@ -353,6 +484,7 @@ class ChatActivity : AppCompatActivity() {
                     }
 
                     if (loadedMids.add(event.mid)) {
+                        val wasAtBottom = isUserNearBottom()
                         val isSelf = (event.fromUid == myUid)
                         val senderName = if (isSelf) myName else SanctuaryCore.getDisplayName(event.fromUid)
                         val msg = ChatMessage(
@@ -364,18 +496,25 @@ class ChatActivity : AppCompatActivity() {
                             createdAt = event.createdAt,
                             isSelf = isSelf,
                             contentType = event.contentType,
-                            syncStatus = ChatMessage.STATUS_SENT
+                            syncStatus = ChatMessage.STATUS_SENT,
+                            replyToMid = event.replyToMid,
+                            replyPreview = resolveReplyPreviewText(event.replyToMid),
+                            filePath = event.filePath,
+                            imageWidth = event.imageWidth,
+                            imageHeight = event.imageHeight
                         )
-                        // 插到还没发出去的本地临时气泡前面，保证时序永远整齐
                         val insertPos = messageList.indexOfFirst { it.syncStatus != ChatMessage.STATUS_SENT }
                         if (insertPos == -1) {
                             messageList.add(msg)
-                            chatAdapter.notifyItemInserted(messageList.size - 1)
-                            rvMessages.scrollToPosition(messageList.size - 1)
                         } else {
                             messageList.add(insertPos, msg)
-                            chatAdapter.notifyItemInserted(insertPos)
                         }
+                        val autoScroll = isSelf || wasAtBottom
+                        if (!autoScroll) {
+                            unreadNewBelowCount++
+                            updateScrollBottomBadge()
+                        }
+                        submitRows(scrollToBottom = autoScroll)
                         SanctuaryCore.markConversationRead(this@ChatActivity, serverUrl, myUid, isGroup, targetId, event.mid)
                         SanctuaryCore.saveLocalChatMessages(this@ChatActivity, serverUrl, myUid, isGroup, targetId, listOf(msg))
                     }
@@ -411,8 +550,7 @@ class ChatActivity : AppCompatActivity() {
                     if (newlyAdded.isNotEmpty()) {
                         messageList.addAll(newlyAdded)
                         messageList.sortBy { it.mid }
-                        chatAdapter.notifyDataSetChanged()
-                        rvMessages.scrollToPosition(messageList.size - 1)
+                        submitRows(scrollToBottom = isUserNearBottom())
                         SanctuaryCore.saveLocalChatMessages(this@ChatActivity, serverUrl, myUid, isGroup, targetId, newlyAdded)
                     }
                     messageList.lastOrNull { it.syncStatus == ChatMessage.STATUS_SENT }?.let {
@@ -443,7 +581,7 @@ class ChatActivity : AppCompatActivity() {
 
                 if (localOlder.isNotEmpty()) {
                     messageList.addAll(0, localOlder)
-                    chatAdapter.notifyItemRangeInserted(0, localOlder.size)
+                    submitRows(scrollToBottom = false)
                     isLoadingOlder = false
                     return@launch
                 }
@@ -465,7 +603,7 @@ class ChatActivity : AppCompatActivity() {
                         val older = parseHistoryArray(arr).sortedBy { it.mid }
                         if (older.isNotEmpty()) {
                             messageList.addAll(0, older)
-                            chatAdapter.notifyItemRangeInserted(0, older.size)
+                            submitRows(scrollToBottom = false)
                             SanctuaryCore.saveLocalChatMessages(this@ChatActivity, serverUrl, myUid, isGroup, targetId, older)
                         } else {
                             hasMoreOlder = false
@@ -481,6 +619,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun parseHistoryArray(arr: JSONArray): List<ChatMessage> {
         val result = mutableListOf<ChatMessage>()
+        val tempByMid = messageList.associateBy { it.mid }.toMutableMap()
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
             val mid = obj.optLong("mid", -1L)
@@ -491,34 +630,53 @@ class ChatActivity : AppCompatActivity() {
             val detail = obj.optJSONObject("detail")
             val contentType = detail?.optString("content_type", "text/plain") ?: "text/plain"
             val content = SanctuaryCore.parseMessagePreview(detail)
+            val replyToMid = if (detail?.optString("type") == "reply") detail.optLong("mid", 0L) else 0L
+            val filePath = if (contentType == "vocechat/file") detail?.optString("content", "") ?: "" else ""
+            val props = detail?.optJSONObject("properties")
+            val imgW = props?.optInt("width", 0) ?: 0
+            val imgH = props?.optInt("height", 0) ?: 0
 
             if (mid != -1L && content.isNotEmpty() && loadedMids.add(mid)) {
                 SanctuaryCore.updateGlobalMaxMid(this, myUid, mid)
                 val isSelf = (fromUid == myUid)
                 val senderName = if (isSelf) myName else SanctuaryCore.getDisplayName(fromUid)
-                result.add(
-                    ChatMessage(
-                        mid = mid,
-                        fromUid = fromUid,
-                        fromName = senderName,
-                        fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(fromUid),
-                        content = content,
-                        createdAt = createdAt,
-                        isSelf = isSelf,
-                        contentType = contentType,
-                        syncStatus = ChatMessage.STATUS_SENT
-                    )
+                val replyPreview = if (replyToMid > 0L) {
+                    val parent = tempByMid[replyToMid]
+                    if (parent != null) "${parent.fromName}: ${parent.content}" else resolveReplyPreviewText(replyToMid)
+                } else ""
+                val parsed = ChatMessage(
+                    mid = mid,
+                    fromUid = fromUid,
+                    fromName = senderName,
+                    fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(fromUid),
+                    content = content,
+                    createdAt = createdAt,
+                    isSelf = isSelf,
+                    contentType = contentType,
+                    syncStatus = ChatMessage.STATUS_SENT,
+                    replyToMid = replyToMid,
+                    replyPreview = replyPreview,
+                    filePath = filePath,
+                    imageWidth = imgW,
+                    imageHeight = imgH
                 )
+                tempByMid[mid] = parsed
+                result.add(parsed)
             }
         }
         return result
     }
 
-    // ⚡ 乐观发送：0ms 上屏 + 入库，后台异步提交，不锁输入框！
-    private fun sendMessageOptimistic(text: String) {
+    private fun sendMessageOptimistic(text: String, replyTo: ChatMessage?) {
         val now = System.currentTimeMillis()
         val seq = tempSeq.incrementAndGet()
         val tempMid = ChatMessage.TEMP_MID_BASE + (now * 100L) + (seq % 100L)
+        val replyMid = replyTo?.mid ?: 0L
+        val replyPreview = if (replyTo != null) {
+            val sender = if (replyTo.isSelf) myName else replyTo.fromName
+            "$sender: ${replyTo.content}"
+        } else ""
+
         val optimisticMsg = ChatMessage(
             mid = tempMid,
             fromUid = myUid,
@@ -528,16 +686,57 @@ class ChatActivity : AppCompatActivity() {
             createdAt = now,
             isSelf = true,
             syncStatus = ChatMessage.STATUS_SENDING,
-            localId = now
+            localId = now,
+            replyToMid = replyMid,
+            replyPreview = replyPreview
         )
         messageList.add(optimisticMsg)
-        val pos = messageList.size - 1
-        chatAdapter.notifyItemInserted(pos)
-        rvMessages.scrollToPosition(pos)
+        submitRows(scrollToBottom = true)
 
-        // 先落盘到永久 SQLite（即使突然杀进程也不会丢失消息）
         SanctuaryCore.saveLocalChatMessages(this, serverUrl, myUid, isGroup, targetId, listOf(optimisticMsg))
-        dispatchSendRequest(optimisticMsg)
+        dispatchSendText(optimisticMsg)
+    }
+
+    private fun sendImageOptimistic(uri: Uri) {
+        lifecycleScope.launch {
+            val compressed = withContext(Dispatchers.IO) {
+                MediaHelper.compressAndStripExif(this@ChatActivity, uri)
+            }
+            if (compressed == null) {
+                Toast.makeText(this@ChatActivity, "无法处理所选图片", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val now = System.currentTimeMillis()
+            val seq = tempSeq.incrementAndGet()
+            val tempMid = ChatMessage.TEMP_MID_BASE + (now * 100L) + (seq % 100L)
+            val optimisticImg = ChatMessage(
+                mid = tempMid,
+                fromUid = myUid,
+                fromName = myName,
+                fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(myUid),
+                content = "[图片]",
+                createdAt = now,
+                isSelf = true,
+                contentType = "vocechat/file",
+                syncStatus = ChatMessage.STATUS_SENDING,
+                localId = now,
+                localFileUri = compressed.localCacheFile.absolutePath,
+                imageWidth = compressed.width,
+                imageHeight = compressed.height
+            )
+            messageList.add(optimisticImg)
+            submitRows(scrollToBottom = true)
+
+            val (ok, realMid, serverPath) = SanctuaryCore.uploadAndSendImageQueued(
+                this@ChatActivity, serverUrl, isGroup, targetId, compressed
+            )
+            if (ok && realMid > 0L) {
+                promoteSentMessage(optimisticImg.mid, realMid, serverPath)
+            } else {
+                markSendFailed(optimisticImg.mid)
+            }
+        }
     }
 
     private fun retryFailedMessage(failedMsg: ChatMessage) {
@@ -545,70 +744,57 @@ class ChatActivity : AppCompatActivity() {
         if (idx == -1) return
         val retryingMsg = failedMsg.copy(syncStatus = ChatMessage.STATUS_SENDING, createdAt = System.currentTimeMillis())
         messageList[idx] = retryingMsg
-        chatAdapter.notifyItemChanged(idx)
+        submitRows(scrollToBottom = false)
         SanctuaryCore.updateLocalMessageStatus(this, serverUrl, myUid, isGroup, targetId, failedMsg.mid, ChatMessage.STATUS_SENDING)
-        dispatchSendRequest(retryingMsg)
+        dispatchSendText(retryingMsg)
     }
 
-    private fun dispatchSendRequest(pendingMsg: ChatMessage) {
-        val sendUrl = if (isGroup) {
-            "$serverUrl/api/group/$targetId/send"
-        } else {
-            "$serverUrl/api/user/$targetId/send"
-        }
-
+    private fun dispatchSendText(pendingMsg: ChatMessage) {
         lifecycleScope.launch {
-            try {
-                val mediaType = "text/plain; charset=utf-8".toMediaType()
-                val (code, midStr) = SanctuaryCore.executeAuthorized(this@ChatActivity) { tk ->
-                    Request.Builder()
-                        .url(sendUrl)
-                        .header("X-API-Key", tk)
-                        .post(pendingMsg.content.toRequestBody(mediaType))
-                        .build()
-                }
-
-                if (code in 200..299) {
-                    val newMid = midStr.trim().toLongOrNull() ?: System.currentTimeMillis()
-                    val curIdx = messageList.indexOfFirst { it.mid == pendingMsg.mid }
-
-                    if (loadedMids.contains(newMid)) {
-                        // SSE 已经抢先一步把真消息落位了，静默移除临时占位即可
-                        if (curIdx != -1) {
-                            messageList.removeAt(curIdx)
-                            chatAdapter.notifyItemRemoved(curIdx)
-                        }
-                        SanctuaryCore.deleteLocalChatMessage(this@ChatActivity, serverUrl, myUid, isGroup, targetId, pendingMsg.mid)
-                    } else {
-                        loadedMids.add(newMid)
-                        val realMsg = pendingMsg.copy(
-                            mid = newMid,
-                            syncStatus = ChatMessage.STATUS_SENT
-                        )
-                        if (curIdx != -1) {
-                            messageList[curIdx] = realMsg
-                            chatAdapter.notifyItemChanged(curIdx)
-                        }
-                        SanctuaryCore.promotePendingMessage(
-                            this@ChatActivity, serverUrl, myUid, isGroup, targetId, pendingMsg.mid, realMsg
-                        )
-                    }
-                    SanctuaryCore.updateGlobalMaxMid(this@ChatActivity, myUid, newMid)
-                    SanctuaryCore.markConversationRead(this@ChatActivity, serverUrl, myUid, isGroup, targetId, newMid)
-                } else {
-                    markSendFailed(pendingMsg.mid)
-                }
-            } catch (_: Exception) {
+            val (ok, realMid) = SanctuaryCore.sendTextQueued(
+                context = this@ChatActivity,
+                serverUrl = serverUrl,
+                isGroup = isGroup,
+                targetId = targetId,
+                text = pendingMsg.content,
+                replyToMid = pendingMsg.replyToMid
+            )
+            if (ok && realMid > 0L) {
+                promoteSentMessage(pendingMsg.mid, realMid, "")
+            } else {
                 markSendFailed(pendingMsg.mid)
             }
         }
+    }
+
+    private fun promoteSentMessage(tempMid: Long, realMid: Long, serverPath: String) {
+        val curIdx = messageList.indexOfFirst { it.mid == tempMid }
+        if (loadedMids.contains(realMid)) {
+            if (curIdx != -1) {
+                messageList.removeAt(curIdx)
+                submitRows(scrollToBottom = false)
+            }
+            SanctuaryCore.deleteLocalChatMessage(this, serverUrl, myUid, isGroup, targetId, tempMid)
+        } else if (curIdx != -1) {
+            loadedMids.add(realMid)
+            val realMsg = messageList[curIdx].copy(
+                mid = realMid,
+                syncStatus = ChatMessage.STATUS_SENT,
+                filePath = serverPath.ifBlank { messageList[curIdx].filePath }
+            )
+            messageList[curIdx] = realMsg
+            submitRows(scrollToBottom = false)
+            SanctuaryCore.promotePendingMessage(this, serverUrl, myUid, isGroup, targetId, tempMid, realMsg)
+        }
+        SanctuaryCore.updateGlobalMaxMid(this, myUid, realMid)
+        SanctuaryCore.markConversationRead(this, serverUrl, myUid, isGroup, targetId, realMid)
     }
 
     private fun markSendFailed(tempMid: Long) {
         val curIdx = messageList.indexOfFirst { it.mid == tempMid }
         if (curIdx != -1) {
             messageList[curIdx] = messageList[curIdx].copy(syncStatus = ChatMessage.STATUS_FAILED)
-            chatAdapter.notifyItemChanged(curIdx)
+            submitRows(scrollToBottom = false)
         }
         SanctuaryCore.updateLocalMessageStatus(
             this, serverUrl, myUid, isGroup, targetId, tempMid, ChatMessage.STATUS_FAILED

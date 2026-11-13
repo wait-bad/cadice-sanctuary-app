@@ -27,7 +27,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:gravity="center"
-                android:textColor="#F8FAFC"
+                android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
@@ -82,18 +82,62 @@
             app:strokeColor="#334155"
             app:strokeWidth="1dp">
 
-            <TextView
-                android:id="@+id/tv_content_left"
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:textIsSelectable="true"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
-                android:textColor="#F8FAFC"
-                android:textSize="14sp"
-                android:lineSpacingExtra="2dp" />
+                android:orientation="vertical">
+
+                <!-- 引用回复预览块 -->
+                <LinearLayout
+                    android:id="@+id/layout_reply_left"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="2dp"
+                    android:visibility="gone">
+
+                    <View
+                        android:layout_width="3dp"
+                        android:layout_height="match_parent"
+                        android:background="#7C3AED" />
+
+                    <TextView
+                        android:id="@+id/tv_reply_left"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:maxLines="2"
+                        android:ellipsize="end"
+                        android:textColor="#94A3B8"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <!-- 气泡内嵌图片 -->
+                <ImageView
+                    android:id="@+id/iv_image_left"
+                    android:layout_width="210dp"
+                    android:layout_height="170dp"
+                    android:adjustViewBounds="true"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone"
+                    android:contentDescription="聊天图片" />
+
+                <TextView
+                    android:id="@+id/tv_content_left"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textIsSelectable="true"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
+                    android:textColor="#F8FAFC"
+                    android:textSize="14sp"
+                    android:lineSpacingExtra="2dp" />
+            </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 </LinearLayout>

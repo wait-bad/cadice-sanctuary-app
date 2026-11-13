@@ -7,15 +7,14 @@ import android.database.sqlite.SQLiteOpenHelper
 
 /**
  * 🗄️ 账号级永久离线 SQLite 数据库（位于应用私有 databases/ 目录，永不被系统清缓存回收）
- * - 按 (server_url, owner_uid) 严格隔离不同服务器、不同账号的离线聊天记录、会话快照与草稿
- * - v2 新增：messages.sync_status / local_id（支持乐观发送状态机）+ drafts 表（支持跨重启草稿持久化）
+ * - v3 新增：reply_to_mid / reply_preview / file_path / image_w / image_h 支持引用与富媒体图片离线查看
  */
 class SanctuaryDb private constructor(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
     companion object {
         private const val DB_NAME = "violet_sanctuary.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         private const val TABLE_MESSAGES = "messages"
         private const val TABLE_CONVERSATIONS = "conversations"
@@ -47,6 +46,11 @@ class SanctuaryDb private constructor(context: Context) :
                 content_type TEXT NOT NULL,
                 sync_status INTEGER NOT NULL DEFAULT 1,
                 local_id INTEGER NOT NULL DEFAULT 0,
+                reply_to_mid INTEGER NOT NULL DEFAULT 0,
+                reply_preview TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL DEFAULT '',
+                image_w INTEGER NOT NULL DEFAULT 0,
+                image_h INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (account_key, is_group, target_id, mid)
             )
             """.trimIndent()
@@ -94,14 +98,16 @@ class SanctuaryDb private constructor(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
-            // 平滑升级保留全部旧离线消息
-            runCatching {
-                db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN sync_status INTEGER NOT NULL DEFAULT 1")
-            }
-            runCatching {
-                db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN local_id INTEGER NOT NULL DEFAULT 0")
-            }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN sync_status INTEGER NOT NULL DEFAULT 1") }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN local_id INTEGER NOT NULL DEFAULT 0") }
             createDraftsTable(db)
+        }
+        if (oldVersion < 3) {
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN reply_to_mid INTEGER NOT NULL DEFAULT 0") }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN reply_preview TEXT NOT NULL DEFAULT ''") }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN file_path TEXT NOT NULL DEFAULT ''") }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN image_w INTEGER NOT NULL DEFAULT 0") }
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN image_h INTEGER NOT NULL DEFAULT 0") }
         }
     }
 
@@ -140,6 +146,11 @@ class SanctuaryDb private constructor(context: Context) :
                 cv.put("content_type", m.contentType)
                 cv.put("sync_status", m.syncStatus)
                 cv.put("local_id", m.localId)
+                cv.put("reply_to_mid", m.replyToMid)
+                cv.put("reply_preview", m.replyPreview)
+                cv.put("file_path", m.filePath)
+                cv.put("image_w", m.imageWidth)
+                cv.put("image_h", m.imageHeight)
                 db.insertWithOnConflict(TABLE_MESSAGES, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
             }
             db.setTransactionSuccessful()
@@ -190,6 +201,11 @@ class SanctuaryDb private constructor(context: Context) :
                 put("content_type", realMsg.contentType)
                 put("sync_status", ChatMessage.STATUS_SENT)
                 put("local_id", realMsg.localId)
+                put("reply_to_mid", realMsg.replyToMid)
+                put("reply_preview", realMsg.replyPreview)
+                put("file_path", realMsg.filePath)
+                put("image_w", realMsg.imageWidth)
+                put("image_h", realMsg.imageHeight)
             }
             db.insertWithOnConflict(TABLE_MESSAGES, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
             db.setTransactionSuccessful()
@@ -218,6 +234,29 @@ class SanctuaryDb private constructor(context: Context) :
         )
     }
 
+    fun getMessageContentByMid(
+        serverUrl: String,
+        myUid: Int,
+        isGroup: Boolean,
+        targetId: Int,
+        mid: Long
+    ): String {
+        if (myUid <= 0 || mid <= 0L) return ""
+        val key = accountKey(serverUrl, myUid)
+        val grp = if (isGroup) 1 else 0
+        readableDatabase.rawQuery(
+            "SELECT from_name, content FROM $TABLE_MESSAGES WHERE account_key = ? AND is_group = ? AND target_id = ? AND mid = ?",
+            arrayOf(key, grp.toString(), targetId.toString(), mid.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                val sender = c.getString(0)
+                val body = c.getString(1)
+                return "$sender: $body"
+            }
+        }
+        return ""
+    }
+
     fun getMessagesPage(
         serverUrl: String,
         myUid: Int,
@@ -230,10 +269,10 @@ class SanctuaryDb private constructor(context: Context) :
         val key = accountKey(serverUrl, myUid)
         val grp = if (isGroup) 1 else 0
         val result = ArrayList<ChatMessage>()
-        val db = readableDatabase
-        db.rawQuery(
+        readableDatabase.rawQuery(
             """
-            SELECT mid, from_uid, from_name, from_avatar_ts, content, created_at, content_type, sync_status, local_id
+            SELECT mid, from_uid, from_name, from_avatar_ts, content, created_at, content_type,
+                   sync_status, local_id, reply_to_mid, reply_preview, file_path, image_w, image_h
             FROM $TABLE_MESSAGES
             WHERE account_key = ? AND is_group = ? AND target_id = ? AND mid < ?
             ORDER BY mid DESC
@@ -248,7 +287,6 @@ class SanctuaryDb private constructor(context: Context) :
                     SanctuaryCore.userMap[fromUid]?.name?.takeIf { it.isNotBlank() } ?: cachedName
                 }
                 val resolvedAv = SanctuaryCore.getAvatarUpdatedAt(fromUid).takeIf { it > 0L } ?: c.getLong(3)
-                // 若上次 App 在 STATUS_SENDING 期间被强杀，重启后自动标为 FAILED 方便点击重发
                 val rawStatus = c.getInt(7)
                 val restoredStatus = if (rawStatus == ChatMessage.STATUS_SENDING) {
                     ChatMessage.STATUS_FAILED
@@ -266,7 +304,12 @@ class SanctuaryDb private constructor(context: Context) :
                         isSelf = (fromUid == myUid),
                         contentType = c.getString(6),
                         syncStatus = restoredStatus,
-                        localId = c.getLong(8)
+                        localId = c.getLong(8),
+                        replyToMid = c.getLong(9),
+                        replyPreview = c.getString(10),
+                        filePath = c.getString(11),
+                        imageWidth = c.getInt(12),
+                        imageHeight = c.getInt(13)
                     )
                 )
             }
@@ -285,6 +328,49 @@ class SanctuaryDb private constructor(context: Context) :
         ).use { c ->
             return if (c.moveToFirst()) c.getLong(0) else 0L
         }
+    }
+
+    fun searchMessages(serverUrl: String, myUid: Int, keyword: String, limit: Int = 60): List<Pair<ConversationItem, ChatMessage>> {
+        if (myUid <= 0 || keyword.isBlank()) return emptyList()
+        val key = accountKey(serverUrl, myUid)
+        val convNameMap = loadConversations(serverUrl, myUid).associateBy { Pair(it.isGroup, it.id) }
+        val list = mutableListOf<Pair<ConversationItem, ChatMessage>>()
+        readableDatabase.rawQuery(
+            """
+            SELECT is_group, target_id, mid, from_uid, from_name, from_avatar_ts, content, created_at, content_type
+            FROM $TABLE_MESSAGES
+            WHERE account_key = ? AND content LIKE ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(key, "%$keyword%", limit.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                val isGroup = c.getInt(0) == 1
+                val targetId = c.getInt(1)
+                val fromUid = c.getInt(3)
+                val existingConv = convNameMap[Pair(isGroup, targetId)]
+                val convName = existingConv?.name ?: if (isGroup) "群聊 #$targetId" else SanctuaryCore.getDisplayName(targetId)
+                val conv = existingConv ?: ConversationItem(
+                    id = targetId,
+                    isGroup = isGroup,
+                    name = convName,
+                    description = ""
+                )
+                val msg = ChatMessage(
+                    mid = c.getLong(2),
+                    fromUid = fromUid,
+                    fromName = c.getString(4),
+                    fromAvatarUpdatedAt = c.getLong(5),
+                    content = c.getString(6),
+                    createdAt = c.getLong(7),
+                    isSelf = (fromUid == myUid),
+                    contentType = c.getString(8)
+                )
+                list.add(Pair(conv, msg))
+            }
+        }
+        return list
     }
 
     fun deleteMessage(serverUrl: String, myUid: Int, isGroup: Boolean, targetId: Int, mid: Long) {

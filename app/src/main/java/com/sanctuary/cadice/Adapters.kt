@@ -1,7 +1,9 @@
 package com.sanctuary.cadice
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
@@ -10,7 +12,11 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.CoroutineScope
@@ -85,7 +91,6 @@ class ConversationAdapter(
         holder.tvName.text = item.name
         holder.tvBadge.text = item.badge
 
-        // 若存在未发送草稿，优先以珊瑚红高亮显示 [草稿]
         if (item.draftText.isNotBlank()) {
             val prefix = "[草稿] "
             val ssb = SpannableStringBuilder(prefix).append(item.draftText.replace('\n', ' '))
@@ -101,7 +106,9 @@ class ConversationAdapter(
         }
 
         holder.tvTime.text = SanctuaryCore.formatListTime(item.lastTime)
-        holder.viewOnlineDot.visibility = if (!item.isGroup && item.isOnline) View.VISIBLE else View.GONE
+        // 核心修复：以 SanctuaryCore.isUserOnline(item.id) 为唯一权威真相源，消息页与联系人页绿点永远一致！
+        val isOnlineNow = !item.isGroup && (SanctuaryCore.isUserOnline(item.id) || item.isOnline)
+        holder.viewOnlineDot.visibility = if (isOnlineNow) View.VISIBLE else View.GONE
 
         if (item.unreadCount > 0) {
             holder.cardUnread.visibility = View.VISIBLE
@@ -135,42 +142,91 @@ class ConversationAdapter(
 class ChatAdapter(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val messages: List<ChatMessage>,
     private val serverUrl: String,
     private val token: String,
-    private val isDarkTheme: Boolean,
-    private val fontScale: Float = 1.0f,
+    private var isDarkTheme: Boolean,
+    private var fontScale: Float = 1.0f,
     private val onMessageLongClick: ((ChatMessage) -> Unit)? = null,
-    private val onRetryFailedClick: ((ChatMessage) -> Unit)? = null
-) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+    private val onRetryFailedClick: ((ChatMessage) -> Unit)? = null,
+    private val onImageClick: ((ChatMessage) -> Unit)? = null
+) : ListAdapter<ChatListRow, RecyclerView.ViewHolder>(DIFF_CALLBACK) {
 
     companion object {
-        private const val TYPE_LEFT = 1
-        private const val TYPE_RIGHT = 2
+        const val TYPE_DATE_DIVIDER = 0
+        const val TYPE_LEFT = 1
+        const val TYPE_RIGHT = 2
+
+        private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<ChatListRow>() {
+            override fun areItemsTheSame(oldItem: ChatListRow, newItem: ChatListRow): Boolean {
+                return oldItem.stableId == newItem.stableId
+            }
+
+            override fun areContentsTheSame(oldItem: ChatListRow, newItem: ChatListRow): Boolean {
+                return oldItem == newItem
+            }
+        }
     }
 
     override fun getItemViewType(position: Int): Int {
-        return if (messages[position].isSelf) TYPE_RIGHT else TYPE_LEFT
+        return when (val row = getItem(position)) {
+            is ChatListRow.DateDivider -> TYPE_DATE_DIVIDER
+            is ChatListRow.MessageRow -> if (row.message.isSelf) TYPE_RIGHT else TYPE_LEFT
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         val inflater = LayoutInflater.from(parent.context)
-        return if (viewType == TYPE_RIGHT) {
-            val view = inflater.inflate(R.layout.item_message_right, parent, false)
-            RightViewHolder(view)
-        } else {
-            val view = inflater.inflate(R.layout.item_message_left, parent, false)
-            LeftViewHolder(view)
+        return when (viewType) {
+            TYPE_DATE_DIVIDER -> DateViewHolder(inflater.inflate(R.layout.item_date_divider, parent, false))
+            TYPE_RIGHT -> RightViewHolder(inflater.inflate(R.layout.item_message_right, parent, false))
+            else -> LeftViewHolder(inflater.inflate(R.layout.item_message_left, parent, false))
         }
     }
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
-        val msg = messages[position]
+        when (val row = getItem(position)) {
+            is ChatListRow.DateDivider -> {
+                val dh = holder as DateViewHolder
+                dh.tvDate.text = row.label
+                if (isDarkTheme) {
+                    dh.cardDate.setCardBackgroundColor(Color.parseColor("#1E293B"))
+                    dh.tvDate.setTextColor(Color.parseColor("#94A3B8"))
+                } else {
+                    dh.cardDate.setCardBackgroundColor(Color.parseColor("#E2E8F0"))
+                    dh.tvDate.setTextColor(Color.parseColor("#475569"))
+                }
+            }
+            is ChatListRow.MessageRow -> bindMessage(holder, row.message)
+        }
+    }
+
+    private fun bindMessage(holder: RecyclerView.ViewHolder, msg: ChatMessage) {
         val timeText = SanctuaryCore.formatBubbleTime(msg.createdAt)
 
         if (holder is RightViewHolder) {
-            holder.tvContent.text = msg.content
-            holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
+            if (msg.replyToMid > 0L) {
+                holder.layoutReply.visibility = View.VISIBLE
+                holder.tvReply.text = msg.replyPreview.ifBlank { "引用消息 #${msg.replyToMid}" }
+            } else {
+                holder.layoutReply.visibility = View.GONE
+            }
+
+            if (msg.isImageMessage) {
+                holder.ivImage.visibility = View.VISIBLE
+                holder.tvContent.visibility = View.GONE
+                SanctuaryCore.loadChatImage(context, scope, serverUrl, msg.filePath, msg.localFileUri, holder.ivImage)
+                holder.ivImage.setOnClickListener { onImageClick?.invoke(msg) }
+                holder.ivImage.setOnLongClickListener {
+                    onMessageLongClick?.invoke(msg)
+                    true
+                }
+            } else {
+                holder.ivImage.visibility = View.GONE
+                holder.tvContent.visibility = View.VISIBLE
+                holder.tvContent.text = msg.content
+                holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
+            }
+
             holder.tvTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * fontScale)
             holder.tvTime.setTextColor(Color.parseColor(if (isDarkTheme) "#64748B" else "#94A3B8"))
 
@@ -218,8 +274,29 @@ class ChatAdapter(
                 tvFallback = holder.tvAvatar
             )
         } else if (holder is LeftViewHolder) {
-            holder.tvContent.text = msg.content
-            holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
+            if (msg.replyToMid > 0L) {
+                holder.layoutReply.visibility = View.VISIBLE
+                holder.tvReply.text = msg.replyPreview.ifBlank { "引用消息 #${msg.replyToMid}" }
+            } else {
+                holder.layoutReply.visibility = View.GONE
+            }
+
+            if (msg.isImageMessage) {
+                holder.ivImage.visibility = View.VISIBLE
+                holder.tvContent.visibility = View.GONE
+                SanctuaryCore.loadChatImage(context, scope, serverUrl, msg.filePath, msg.localFileUri, holder.ivImage)
+                holder.ivImage.setOnClickListener { onImageClick?.invoke(msg) }
+                holder.ivImage.setOnLongClickListener {
+                    onMessageLongClick?.invoke(msg)
+                    true
+                }
+            } else {
+                holder.ivImage.visibility = View.GONE
+                holder.tvContent.visibility = View.VISIBLE
+                holder.tvContent.text = msg.content
+                holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
+            }
+
             holder.tvSender.text = msg.fromName
             holder.tvSender.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * fontScale)
             holder.tvTime.text = timeText
@@ -233,12 +310,14 @@ class ChatAdapter(
                 holder.cardBubble.setCardBackgroundColor(Color.parseColor("#1E293B"))
                 holder.cardBubble.strokeColor = Color.parseColor("#334155")
                 holder.tvContent.setTextColor(Color.parseColor("#F8FAFC"))
+                holder.tvReply.setTextColor(Color.parseColor("#94A3B8"))
                 holder.tvSender.setTextColor(Color.parseColor("#94A3B8"))
                 holder.tvTime.setTextColor(Color.parseColor("#64748B"))
             } else {
                 holder.cardBubble.setCardBackgroundColor(Color.parseColor("#FFFFFF"))
                 holder.cardBubble.strokeColor = Color.parseColor("#E2E8F0")
                 holder.tvContent.setTextColor(Color.parseColor("#0F172A"))
+                holder.tvReply.setTextColor(Color.parseColor("#64748B"))
                 holder.tvSender.setTextColor(Color.parseColor("#64748B"))
                 holder.tvTime.setTextColor(Color.parseColor("#94A3B8"))
             }
@@ -258,7 +337,10 @@ class ChatAdapter(
         }
     }
 
-    override fun getItemCount(): Int = messages.size
+    class DateViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val cardDate: MaterialCardView = view.findViewById(R.id.card_date_divider)
+        val tvDate: TextView = view.findViewById(R.id.tv_date_divider)
+    }
 
     class LeftViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val tvAvatar: TextView = view.findViewById(R.id.tv_avatar_left)
@@ -266,6 +348,9 @@ class ChatAdapter(
         val tvSender: TextView = view.findViewById(R.id.tv_sender_name)
         val tvTime: TextView = view.findViewById(R.id.tv_time_left)
         val cardBubble: MaterialCardView = view.findViewById(R.id.card_bubble_left)
+        val layoutReply: LinearLayout = view.findViewById(R.id.layout_reply_left)
+        val tvReply: TextView = view.findViewById(R.id.tv_reply_left)
+        val ivImage: ImageView = view.findViewById(R.id.iv_image_left)
         val tvContent: TextView = view.findViewById(R.id.tv_content_left)
     }
 
@@ -275,6 +360,79 @@ class ChatAdapter(
         val tvTime: TextView = view.findViewById(R.id.tv_time_right)
         val tvSendStatus: TextView = view.findViewById(R.id.tv_send_status)
         val cardBubble: MaterialCardView = view.findViewById(R.id.card_bubble_right)
+        val layoutReply: LinearLayout = view.findViewById(R.id.layout_reply_right)
+        val tvReply: TextView = view.findViewById(R.id.tv_reply_right)
+        val ivImage: ImageView = view.findViewById(R.id.iv_image_right)
         val tvContent: TextView = view.findViewById(R.id.tv_content_right)
+    }
+}
+
+/**
+ * ↩️ 右滑引用回复手势处理器（借鉴 GetStream SwipeReplyCallback）
+ */
+class SwipeReplyCallback(
+    private val adapter: ChatAdapter,
+    private val onReplyTriggered: (ChatMessage) -> Unit
+) : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.RIGHT) {
+
+    private var triggered = false
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#A78BFA")
+        textSize = 36f
+        textAlign = Paint.Align.CENTER
+    }
+
+    override fun getSwipeDirs(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder): Int {
+        val pos = viewHolder.bindingAdapterPosition
+        if (pos == RecyclerView.NO_POSITION) return 0
+        val row = adapter.currentList.getOrNull(pos) ?: return 0
+        if (row !is ChatListRow.MessageRow || row.message.syncStatus != ChatMessage.STATUS_SENT) {
+            return 0
+        }
+        return super.getSwipeDirs(recyclerView, viewHolder)
+    }
+
+    override fun onMove(
+        recyclerView: RecyclerView,
+        viewHolder: RecyclerView.ViewHolder,
+        target: RecyclerView.ViewHolder
+    ): Boolean = false
+
+    override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+        // 不真正移除条目，而是回弹复位
+    }
+
+    override fun getSwipeThreshold(viewHolder: RecyclerView.ViewHolder): Float = 1.5f
+
+    override fun onChildDraw(
+        c: Canvas,
+        recyclerView: RecyclerView,
+        viewHolder: RecyclerView.ViewHolder,
+        dX: Float,
+        dY: Float,
+        actionState: Int,
+        isCurrentlyActive: Boolean
+    ) {
+        val maxPull = recyclerView.resources.displayMetrics.density * 72f
+        val clampedDx = dX.coerceIn(0f, maxPull)
+        if (clampedDx >= maxPull * 0.72f && isCurrentlyActive && !triggered) {
+            triggered = true
+            val pos = viewHolder.bindingAdapterPosition
+            val row = if (pos != RecyclerView.NO_POSITION) adapter.currentList.getOrNull(pos) else null
+            if (row is ChatListRow.MessageRow) {
+                viewHolder.itemView.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                onReplyTriggered(row.message)
+            }
+        }
+        if (dX == 0f || !isCurrentlyActive) {
+            triggered = false
+        }
+        if (clampedDx > 16f) {
+            val cy = viewHolder.itemView.top + viewHolder.itemView.height / 2f + 12f
+            val alpha = ((clampedDx / maxPull) * 255f).toInt().coerceIn(40, 255)
+            textPaint.alpha = alpha
+            c.drawText("↩", clampedDx * 0.45f, cy, textPaint)
+        }
+        super.onChildDraw(c, recyclerView, viewHolder, clampedDx, dY, actionState, isCurrentlyActive)
     }
 }

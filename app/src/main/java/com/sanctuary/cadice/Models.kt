@@ -35,8 +35,18 @@ data class ChatMessage(
     val isSelf: Boolean,
     val contentType: String = "text/plain",
     val syncStatus: Int = STATUS_SENT,
-    val localId: Long = 0L
+    val localId: Long = 0L,
+    val replyToMid: Long = 0L,
+    val replyPreview: String = "",
+    val filePath: String = "",
+    val localFileUri: String = "",
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0
 ) {
+    val isImageMessage: Boolean
+        get() = contentType == "vocechat/file" && (filePath.isNotBlank() || localFileUri.isNotBlank()) &&
+            (content == "[图片]" || imageWidth > 0 || localFileUri.isNotBlank())
+
     companion object {
         const val STATUS_SENDING = 0
         const val STATUS_SENT = 1
@@ -45,13 +55,34 @@ data class ChatMessage(
     }
 }
 
+sealed class ChatListRow {
+    abstract val stableId: String
+
+    data class DateDivider(
+        val dayKey: String,
+        val label: String
+    ) : ChatListRow() {
+        override val stableId: String = "date_$dayKey"
+    }
+
+    data class MessageRow(
+        val message: ChatMessage
+    ) : ChatListRow() {
+        override val stableId: String = "msg_${message.mid}"
+    }
+}
+
 data class IncomingChatEvent(
     val mid: Long,
     val fromUid: Int,
     val isGroup: Boolean,
-    val targetId: Int, // 若 isGroup=true 为 gid；若 isGroup=false 为对方 uid
+    val targetId: Int,
     val content: String,
     val contentType: String,
     val createdAt: Long,
-    val isRealtime: Boolean = true
+    val isRealtime: Boolean = true,
+    val replyToMid: Long = 0L,
+    val filePath: String = "",
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0
 )

@@ -9,6 +9,7 @@ import android.util.TypedValue
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
@@ -55,6 +56,21 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         setupFontSizeControl()
+        setupKeepAliveSwitch()
+    }
+
+    private fun setupKeepAliveSwitch() {
+        val sw = findViewById<SwitchCompat>(R.id.switch_keep_alive)
+        sw.isChecked = prefs.getBoolean(SanctuaryCore.KEY_KEEP_ALIVE, false)
+        sw.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean(SanctuaryCore.KEY_KEEP_ALIVE, isChecked).apply()
+            SanctuaryKeepAliveService.syncWithPreference(this)
+            Toast.makeText(
+                this,
+                if (isChecked) "已开启前台长连接保活" else "已关闭后台保活服务",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     private fun refreshAvatarPreview() {
@@ -160,7 +176,10 @@ class SettingsActivity : AppCompatActivity() {
         val tvFontTitle = findViewById<TextView>(R.id.tv_font_title)
         val cardPreview = findViewById<MaterialCardView>(R.id.card_font_preview)
         val tvPreview = findViewById<TextView>(R.id.tv_font_preview)
-
+        val tvSecKeepAlive = findViewById<TextView>(R.id.tv_section_keepalive)
+        val cardKeepAlive = findViewById<MaterialCardView>(R.id.card_settings_keepalive)
+        val tvKeepAliveTitle = findViewById<TextView>(R.id.tv_keepalive_title)
+        val tvKeepAliveDesc = findViewById<TextView>(R.id.tv_keepalive_desc)
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         if (isDarkTheme) {
             val bg = Color.parseColor("#0F172A")
@@ -192,6 +211,11 @@ class SettingsActivity : AppCompatActivity() {
             cardPreview.setCardBackgroundColor(bg)
             cardPreview.strokeColor = stroke
             tvPreview.setTextColor(textMain)
+            tvSecKeepAlive.setTextColor(textSub)
+            cardKeepAlive.setCardBackgroundColor(card)
+            cardKeepAlive.strokeColor = stroke
+            tvKeepAliveTitle.setTextColor(textMain)
+            tvKeepAliveDesc.setTextColor(textSub)
         } else {
             val bg = Color.parseColor("#F8FAFC")
             val card = Color.parseColor("#FFFFFF")
@@ -222,6 +246,11 @@ class SettingsActivity : AppCompatActivity() {
             cardPreview.setCardBackgroundColor(bg)
             cardPreview.strokeColor = stroke
             tvPreview.setTextColor(textMain)
+            tvSecKeepAlive.setTextColor(textSub)
+            cardKeepAlive.setCardBackgroundColor(card)
+            cardKeepAlive.strokeColor = stroke
+            tvKeepAliveTitle.setTextColor(textMain)
+            tvKeepAliveDesc.setTextColor(textSub)
         }
     }
 }

@@ -4,19 +4,26 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.LruCache
 import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import okhttp3.Call
 import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -25,10 +32,13 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 object SanctuaryCore {
 
@@ -43,8 +53,8 @@ object SanctuaryCore {
     const val KEY_IS_ADMIN = "is_admin"
     const val KEY_DARK_THEME = "dark_theme"
     const val KEY_FONT_SCALE = "font_scale"
+    const val KEY_KEEP_ALIVE = "keep_alive_service"
 
-    // 限制单主机最大并发连接数为 4，防止手机打开十几个请求把 Cloudflare 隧道挤爆超时
     private val sharedDispatcher = Dispatcher().apply {
         maxRequests = 16
         maxRequestsPerHost = 4
@@ -57,7 +67,7 @@ object SanctuaryCore {
         .writeTimeout(25, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
-                .header("User-Agent", "VioletIM/1.5 (Android; Mobile)")
+                .header("User-Agent", "VioletIM/1.7 (Android; Mobile)")
                 .build()
             chain.proceed(req)
         }
@@ -69,7 +79,7 @@ object SanctuaryCore {
         .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
-                .header("User-Agent", "VioletIM/1.5 (Android; Mobile)")
+                .header("User-Agent", "VioletIM/1.7 (Android; Mobile)")
                 .build()
             chain.proceed(req)
         }
@@ -80,16 +90,28 @@ object SanctuaryCore {
 
     private val avatarMemoryCache = LruCache<String, Bitmap>(100)
     private val inFlightAvatars = ConcurrentHashMap<String, Deferred<Bitmap?>>()
+    private val chatImageMemoryCache = LruCache<String, Bitmap>(48)
+    private val inFlightChatImages = ConcurrentHashMap<String, Deferred<Bitmap?>>()
     private val coreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val renewMutex = Mutex()
     private val previewSemaphore = Semaphore(3)
     private val avatarSemaphore = Semaphore(2)
+    private val chatImageSemaphore = Semaphore(3)
+
+    // 同会话串行保序发送锁（借鉴 Element SemaphoreCoroutineSequencer）
+    private val sendSequencers = ConcurrentHashMap<String, Mutex>()
 
     @Volatile
     var activeToken: String = ""
 
-    private val _incomingMessages = MutableSharedFlow<IncomingChatEvent>(extraBufferCapacity = 64)
+    @Volatile
+    var isNetworkValidated: Boolean = true
+
+    @Volatile
+    var isSseConnected: Boolean = false
+
+    private val _incomingMessages = MutableSharedFlow<IncomingChatEvent>(extraBufferCapacity = 128)
     val incomingMessages = _incomingMessages.asSharedFlow()
 
     private val _userStateEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
@@ -98,8 +120,20 @@ object SanctuaryCore {
     private val _authExpiredEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val authExpiredEvents = _authExpiredEvents.asSharedFlow()
 
+    private val _connectionStateEvents = MutableSharedFlow<Boolean>(extraBufferCapacity = 8)
+    val connectionStateEvents = _connectionStateEvents.asSharedFlow()
+
     private var sseJob: Job? = null
+    private var sseCollectorJob: Job? = null
+    @Volatile
+    private var activeSseCall: Call? = null
     private val sseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sseWakeupChannel = Channel<Unit>(Channel.CONFLATED)
+    private val networkCallbackRegistered = AtomicBoolean(false)
+
+    // 自适应微批收集通道（借鉴 GetStream SocketEventCollector：300ms / 1000ms / 200 条）
+    private val sseRawEventChannel = Channel<IncomingChatEvent>(capacity = 256)
+    private val lastUserStateEmitMs = AtomicLong(0L)
 
     fun getDisplayName(uid: Int): String {
         return userMap[uid]?.name?.takeIf { it.isNotBlank() } ?: "用户 #$uid"
@@ -123,10 +157,62 @@ object SanctuaryCore {
         userMap.clear()
         onlineMap.clear()
         inFlightAvatars.clear()
-        // 注意：故意保留 SQLite 永久离线库 (SanctuaryDb) 与本地消息记录，退出账号再登录依然完整保留！
+        inFlightChatImages.clear()
+        sendSequencers.clear()
+        NotificationHelper.clearAllNotifications(context)
     }
 
-    // ==================== 🔖 持久化游标（彻底根除反复弹出未读 & 重复全量拉取） ====================
+    // ==================== 🌐 真实网络状态监听（NET_CAPABILITY_VALIDATED） ====================
+
+    fun ensureNetworkMonitor(context: Context) {
+        if (!networkCallbackRegistered.compareAndSet(false, true)) return
+        try {
+            val appCtx = context.applicationContext
+            val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val req = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    checkValidatedAndWake(cm)
+                }
+
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    val wasDown = !isNetworkValidated
+                    isNetworkValidated = validated
+                    if (validated && wasDown) {
+                        sseWakeupChannel.trySend(Unit)
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val active = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+                    val stillValid = active?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+                    isNetworkValidated = stillValid
+                    if (!stillValid) {
+                        isSseConnected = false
+                        _connectionStateEvents.tryEmit(false)
+                    }
+                }
+            })
+        } catch (_: Exception) {
+            networkCallbackRegistered.set(false)
+        }
+    }
+
+    private fun checkValidatedAndWake(cm: ConnectivityManager) {
+        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        isNetworkValidated = validated
+        if (validated) {
+            sseWakeupChannel.trySend(Unit)
+        }
+    }
+
+    // ==================== 🔖 持久化游标 ====================
 
     private fun readMidKey(myUid: Int, isGroup: Boolean, targetId: Int): String {
         return "read_mid_${myUid}_${if (isGroup) "g" else "u"}_$targetId"
@@ -147,7 +233,6 @@ object SanctuaryCore {
         }
     }
 
-    // 标记会话已读：本地持久化 + 异步同步到 VoceChat 服务器 /api/user/read-index
     fun markConversationRead(
         context: Context,
         serverUrl: String,
@@ -159,6 +244,7 @@ object SanctuaryCore {
         if (mid <= 0L) return
         setLastReadMidLocal(context, myUid, isGroup, targetId, mid)
         val appCtx = context.applicationContext
+        NotificationHelper.clearRoomNotifications(appCtx, isGroup, targetId)
         coreScope.launch {
             try {
                 val payload = JSONObject().apply {
@@ -202,7 +288,7 @@ object SanctuaryCore {
         }
     }
 
-    // ==================== 💾 永久离线 SQLite 聊天记录存储（按服务器 + 账号 UID 严格隔离） ====================
+    // ==================== 💾 永久离线 SQLite 聊天记录存储 ====================
 
     fun loadLocalChatPage(
         context: Context,
@@ -214,16 +300,6 @@ object SanctuaryCore {
         limit: Int = 50
     ): List<ChatMessage> {
         return SanctuaryDb.getInstance(context).getMessagesPage(serverUrl, myUid, isGroup, targetId, beforeMid, limit)
-    }
-
-    fun getLocalConversationMaxMid(
-        context: Context,
-        serverUrl: String,
-        myUid: Int,
-        isGroup: Boolean,
-        targetId: Int
-    ): Long {
-        return SanctuaryDb.getInstance(context).getMaxMidForConversation(serverUrl, myUid, isGroup, targetId)
     }
 
     fun saveLocalChatMessages(
@@ -311,7 +387,139 @@ object SanctuaryCore {
         }
     }
 
-    // 🗑️ 向服务器请求删除单条消息 (DELETE /api/message/{mid})
+    // ==================== 📮 同会话严格保序发送 + 引用回复 + 图片上传 ====================
+
+    private fun getConversationMutex(isGroup: Boolean, targetId: Int): Mutex {
+        val key = "${if (isGroup) "g" else "u"}_$targetId"
+        return sendSequencers.getOrPut(key) { Mutex() }
+    }
+
+    suspend fun sendTextQueued(
+        context: Context,
+        serverUrl: String,
+        isGroup: Boolean,
+        targetId: Int,
+        text: String,
+        replyToMid: Long = 0L
+    ): Pair<Boolean, Long> {
+        val mutex = getConversationMutex(isGroup, targetId)
+        return mutex.withLock {
+            try {
+                val url = if (replyToMid > 0L) {
+                    "$serverUrl/api/message/$replyToMid/reply"
+                } else if (isGroup) {
+                    "$serverUrl/api/group/$targetId/send"
+                } else {
+                    "$serverUrl/api/user/$targetId/send"
+                }
+                val mediaType = "text/plain; charset=utf-8".toMediaType()
+                val (code, body) = executeAuthorized(context.applicationContext) { tk ->
+                    Request.Builder()
+                        .url(url)
+                        .header("X-API-Key", tk)
+                        .post(text.toRequestBody(mediaType))
+                        .build()
+                }
+                if (code in 200..299) {
+                    val mid = body.trim().toLongOrNull() ?: System.currentTimeMillis()
+                    Pair(true, mid)
+                } else {
+                    Pair(false, 0L)
+                }
+            } catch (_: Exception) {
+                Pair(false, 0L)
+            }
+        }
+    }
+
+    suspend fun uploadAndSendImageQueued(
+        context: Context,
+        serverUrl: String,
+        isGroup: Boolean,
+        targetId: Int,
+        compressed: CompressedImageResult
+    ): Triple<Boolean, Long, String> {
+        val mutex = getConversationMutex(isGroup, targetId)
+        return mutex.withLock {
+            try {
+                val filePath = uploadImageFile(context.applicationContext, serverUrl, compressed.bytes, compressed.fileName)
+                    ?: return@withLock Triple(false, 0L, "")
+
+                val sendUrl = if (isGroup) {
+                    "$serverUrl/api/group/$targetId/send"
+                } else {
+                    "$serverUrl/api/user/$targetId/send"
+                }
+                val payload = JSONObject().apply { put("path", filePath) }.toString()
+                val (code, body) = executeAuthorized(context.applicationContext) { tk ->
+                    Request.Builder()
+                        .url(sendUrl)
+                        .header("X-API-Key", tk)
+                        .post(payload.toRequestBody("vocechat/file".toMediaType()))
+                        .build()
+                }
+                if (code in 200..299) {
+                    val mid = body.trim().toLongOrNull() ?: System.currentTimeMillis()
+                    Triple(true, mid, filePath)
+                } else {
+                    Triple(false, 0L, filePath)
+                }
+            } catch (_: Exception) {
+                Triple(false, 0L, "")
+            }
+        }
+    }
+
+    private suspend fun uploadImageFile(
+        context: Context,
+        serverUrl: String,
+        bytes: ByteArray,
+        fileName: String
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val prepBody = JSONObject().apply {
+                put("content_type", "image/jpeg")
+                put("filename", fileName)
+            }.toString()
+            val (prepCode, prepRes) = executeAuthorized(context) { tk ->
+                Request.Builder()
+                    .url("$serverUrl/api/resource/file/prepare")
+                    .header("X-API-Key", tk)
+                    .post(prepBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+            }
+            if (prepCode !in 200..299) return@withContext null
+            val fileId = prepRes.trim().trim('"')
+            if (fileId.isBlank()) return@withContext null
+
+            val multipart = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file_id", fileId)
+                .addFormDataPart(
+                    "chunk_data",
+                    fileName,
+                    bytes.toRequestBody("image/jpeg".toMediaType())
+                )
+                .addFormDataPart("chunk_is_last", "true")
+                .build()
+
+            val (upCode, upRes) = executeAuthorized(context) { tk ->
+                Request.Builder()
+                    .url("$serverUrl/api/resource/file/upload")
+                    .header("X-API-Key", tk)
+                    .post(multipart)
+                    .build()
+            }
+            if (upCode in 200..299 && upRes.startsWith("{")) {
+                JSONObject(upRes).optString("path", "").takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun deleteServerMessage(
         context: Context,
         serverUrl: String,
@@ -433,8 +641,6 @@ object SanctuaryCore {
 
     fun loadHomeSnapshot(context: Context, serverUrl: String, myUid: Int): Pair<List<ConversationItem>, List<ConversationItem>>? {
         return try {
-            val dbItems = SanctuaryDb.getInstance(context).loadConversations(serverUrl, myUid)
-            // 同步恢复用户资料快照以便离线显示昵称与头像时间戳
             val file = File(context.filesDir, "users_profile_${myUid}.json")
             if (file.exists()) {
                 val usersArr = JSONArray(file.readText())
@@ -442,6 +648,7 @@ object SanctuaryCore {
                     putUserJson(usersArr.getJSONObject(i))
                 }
             }
+            val dbItems = SanctuaryDb.getInstance(context).loadConversations(serverUrl, myUid)
             if (dbItems.isEmpty()) null else Pair(dbItems, dbItems)
         } catch (_: Exception) {
             null
@@ -474,51 +681,6 @@ object SanctuaryCore {
             } catch (_: Exception) {
             }
         }
-    }
-
-    private fun itemsToJson(list: List<ConversationItem>): JSONArray {
-        val arr = JSONArray()
-        list.forEach { item ->
-            arr.put(JSONObject().apply {
-                put("id", item.id)
-                put("isGroup", item.isGroup)
-                put("name", item.name)
-                put("description", item.description)
-                put("lastMsg", item.lastMsg)
-                put("lastTime", item.lastTime)
-                put("lastMid", item.lastMid)
-                put("unreadCount", item.unreadCount)
-                put("avatarUpdatedAt", item.avatarUpdatedAt)
-                put("badge", item.badge)
-            })
-        }
-        return arr
-    }
-
-    private fun jsonToItems(arr: JSONArray?): List<ConversationItem> {
-        if (arr == null) return emptyList()
-        val list = mutableListOf<ConversationItem>()
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val isGroup = o.optBoolean("isGroup", false)
-            val id = o.getInt("id")
-            list.add(
-                ConversationItem(
-                    id = id,
-                    isGroup = isGroup,
-                    name = o.optString("name", ""),
-                    description = o.optString("description", ""),
-                    lastMsg = o.optString("lastMsg", ""),
-                    lastTime = o.optLong("lastTime", 0L),
-                    lastMid = o.optLong("lastMid", 0L),
-                    unreadCount = o.optInt("unreadCount", 0),
-                    avatarUpdatedAt = o.optLong("avatarUpdatedAt", 0L),
-                    isOnline = if (isGroup) false else isUserOnline(id),
-                    badge = o.optString("badge", if (isGroup) "群聊" else "好友")
-                )
-            )
-        }
-        return list
     }
 
     // ==================== ⚡ 基础名录 & 增量摘要拉取 ====================
@@ -690,6 +852,7 @@ object SanctuaryCore {
         myUid: Int,
         item: ConversationItem
     ): ConversationItem {
+        val latestOnline = if (item.isGroup) false else isUserOnline(item.id)
         return try {
             val url = if (item.isGroup) {
                 "$serverUrl/api/group/${item.id}/history?limit=1"
@@ -720,7 +883,6 @@ object SanctuaryCore {
                     updateGlobalMaxMid(context, myUid, mid)
 
                     val lastRead = getLastReadMid(context, myUid, item.isGroup, item.id)
-                    // 初次初始化若无本地游标且非本人刚发，默认把已有历史基准记为已读，避免首次进入满屏假红点
                     if (lastRead == 0L && mid > 0L) {
                         setLastReadMidLocal(context, myUid, item.isGroup, item.id, mid)
                     }
@@ -731,17 +893,18 @@ object SanctuaryCore {
                         lastMsg = formatted,
                         lastTime = createdAt,
                         lastMid = mid,
-                        unreadCount = unread
+                        unreadCount = unread,
+                        isOnline = latestOnline
                     )
                 }
             }
-            item
+            item.copy(isOnline = latestOnline)
         } catch (_: Exception) {
-            item
+            item.copy(isOnline = latestOnline)
         }
     }
 
-    // ==================== 🖼️ 头像上传与双层缓存 ====================
+    // ==================== 🖼️ 头像与聊天图片双层缓存加载 ====================
 
     suspend fun uploadUserAvatar(
         context: Context,
@@ -786,22 +949,137 @@ object SanctuaryCore {
         }
     }
 
-    // ==================== 🔌 增量 SSE 实时事件流 (带 after_mid 与 ready 识别) ====================
+    fun loadChatImage(
+        context: Context,
+        scope: CoroutineScope,
+        serverUrl: String,
+        filePath: String,
+        localFileUri: String,
+        imageView: ImageView
+    ) {
+        val cacheKey = if (filePath.isNotBlank()) "img_$filePath" else "local_$localFileUri"
+        imageView.tag = cacheKey
+
+        chatImageMemoryCache.get(cacheKey)?.let { bmp ->
+            imageView.setImageBitmap(bmp)
+            return
+        }
+
+        imageView.setImageBitmap(null)
+        scope.launch {
+            val bmp = fetchOrLoadChatImageBitmap(context.applicationContext, serverUrl, filePath, localFileUri, cacheKey)
+            if (bmp != null) {
+                withContext(Dispatchers.Main) {
+                    if (imageView.tag == cacheKey) {
+                        imageView.setImageBitmap(bmp)
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun fetchOrLoadChatImageBitmap(
+        context: Context,
+        serverUrl: String,
+        filePath: String,
+        localFileUri: String,
+        cacheKey: String = if (filePath.isNotBlank()) "img_$filePath" else "local_$localFileUri",
+        maxDim: Int = 900
+    ): Bitmap? {
+        chatImageMemoryCache.get(cacheKey)?.let { return it }
+
+        if (localFileUri.isNotBlank()) {
+            val f = File(localFileUri)
+            if (f.exists() && f.length() > 0) {
+                val bmp = withContext(Dispatchers.IO) {
+                    decodeSampledBitmap(f.readBytes(), maxDim, maxDim)
+                }
+                if (bmp != null) {
+                    if (maxDim <= 900) chatImageMemoryCache.put(cacheKey, bmp)
+                    return bmp
+                }
+            }
+        }
+
+        if (filePath.isBlank() || serverUrl.isBlank()) return null
+
+        val imgDir = File(context.cacheDir, "chat_images").apply { if (!exists()) mkdirs() }
+        val safeName = filePath.replace("/", "_")
+        val diskFile = File(imgDir, safeName)
+        if (diskFile.exists() && diskFile.length() > 0) {
+            val bmp = withContext(Dispatchers.IO) {
+                decodeSampledBitmap(diskFile.readBytes(), maxDim, maxDim)
+            }
+            if (bmp != null) {
+                if (maxDim <= 900) chatImageMemoryCache.put(cacheKey, bmp)
+                return bmp
+            }
+        }
+
+        val deferred = inFlightChatImages.getOrPut(cacheKey) {
+            coreScope.async {
+                chatImageSemaphore.withPermit {
+                    try {
+                        val validTk = ensureValidToken(context, forceRenew = false) ?: activeToken
+                        val encoded = URLEncoder.encode(filePath, "UTF-8")
+                        val url = "$serverUrl/api/resource/file?file_path=$encoded"
+                        val req = Request.Builder()
+                            .url(url)
+                            .header("X-API-Key", validTk)
+                            .get()
+                            .build()
+                        httpClient.newCall(req).execute().use { res ->
+                            if (res.isSuccessful) {
+                                val bytes = res.body?.bytes()
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    FileOutputStream(diskFile).use { it.write(bytes) }
+                                    val bmp = decodeSampledBitmap(bytes, maxDim, maxDim)
+                                    if (bmp != null) {
+                                        if (maxDim <= 900) chatImageMemoryCache.put(cacheKey, bmp)
+                                        return@withPermit bmp
+                                    }
+                                }
+                            }
+                        }
+                        null
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        inFlightChatImages.remove(cacheKey)
+                    }
+                }
+            }
+        }
+        return deferred.await()
+    }
+
+    // ==================== 🔌 增量 SSE 实时事件流 + 35s 假死心跳看门狗 + 300ms 微批收集 ====================
 
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
         val appContext = context.applicationContext
+        ensureNetworkMonitor(appContext)
+        startMicroBatchCollector(appContext)
+
         sseJob?.cancel()
         sseJob = sseScope.launch {
             var backoffMs = 2000L
             while (isActive) {
+                if (!isNetworkValidated) {
+                    isSseConnected = false
+                    _connectionStateEvents.tryEmit(false)
+                    withTimeoutOrNull(6000L) {
+                        sseWakeupChannel.receive()
+                    }
+                    continue
+                }
+
                 try {
                     val freshToken = ensureValidToken(appContext, forceRenew = false)
                     if (freshToken.isNullOrEmpty()) {
-                        delay(5000L)
+                        delay(4000L)
                         continue
                     }
 
-                    // 关键升级：携带本地已同步到的 globalMaxMid，防止每次重连重复重放历史消息！
                     val afterMid = getGlobalMaxMid(appContext, myUid)
                     val sseUrl = if (afterMid > 0L) {
                         "$serverUrl/api/user/events?api-key=$freshToken&after_mid=$afterMid"
@@ -816,39 +1094,103 @@ object SanctuaryCore {
                         .build()
 
                     var sseReady = false
-                    sseClient.newCall(req).execute().use { response ->
-                        if (response.isSuccessful) {
-                            backoffMs = 2000L
-                            val source = response.body?.source()
-                            while (isActive && source != null && !source.exhausted()) {
-                                val line = source.readUtf8Line() ?: break
-                                if (line.startsWith("data:")) {
-                                    val jsonText = line.removePrefix("data:").trim()
-                                    if (jsonText.startsWith("{")) {
-                                        val becameReady = handleSseJson(appContext, serverUrl, jsonText, myUid, sseReady)
-                                        if (becameReady) sseReady = true
+                    val lastActivityAt = AtomicLong(System.currentTimeMillis())
+                    val call = sseClient.newCall(req)
+                    activeSseCall = call
+
+                    val watchdogJob = launch {
+                        while (isActive) {
+                            delay(10_000L)
+                            if (System.currentTimeMillis() - lastActivityAt.get() > 38_000L) {
+                                call.cancel()
+                                break
+                            }
+                        }
+                    }
+
+                    try {
+                        call.execute().use { response ->
+                            if (response.isSuccessful) {
+                                backoffMs = 2000L
+                                isSseConnected = true
+                                _connectionStateEvents.tryEmit(true)
+                                val source = response.body?.source()
+                                while (isActive && source != null && !source.exhausted()) {
+                                    val line = source.readUtf8Line() ?: break
+                                    lastActivityAt.set(System.currentTimeMillis())
+                                    if (line.startsWith("data:")) {
+                                        val jsonText = line.removePrefix("data:").trim()
+                                        if (jsonText.startsWith("{")) {
+                                            val becameReady = handleSseJson(appContext, serverUrl, jsonText, myUid, sseReady)
+                                            if (becameReady) sseReady = true
+                                        }
                                     }
                                 }
+                            } else if (response.code == 401 || response.code == 403) {
+                                ensureValidToken(appContext, forceRenew = true)
                             }
-                        } else if (response.code == 401 || response.code == 403) {
-                            ensureValidToken(appContext, forceRenew = true)
                         }
+                    } finally {
+                        watchdogJob.cancel()
+                        activeSseCall = null
                     }
                 } catch (_: CancellationException) {
                     break
                 } catch (_: Exception) {
                 }
 
+                isSseConnected = false
+                _connectionStateEvents.tryEmit(false)
                 if (!isActive) break
-                delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(15000L)
+
+                withTimeoutOrNull(backoffMs) {
+                    sseWakeupChannel.receive()
+                }
+                backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
             }
         }
+    }
+
+    private fun startMicroBatchCollector(appContext: Context) {
+        if (sseCollectorJob?.isActive == true) return
+        sseCollectorJob = sseScope.launch {
+            val batch = ArrayList<IncomingChatEvent>(32)
+            while (isActive) {
+                val first = sseRawEventChannel.receiveCatching().getOrNull() ?: break
+                batch.add(first)
+
+                // 300ms 静止提交 / 1000ms 上限 / 200 条上限（GetStream SocketEventCollector 算法）
+                val deadline = System.currentTimeMillis() + 1000L
+                while (batch.size < 200) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0L) break
+                    val next = withTimeoutOrNull(minOf(300L, remaining)) {
+                        sseRawEventChannel.receiveCatching().getOrNull()
+                    } ?: break
+                    batch.add(next)
+                }
+
+                for (ev in batch) {
+                    _incomingMessages.emit(ev)
+                    if (ev.isRealtime && ev.fromUid != getSavedUid(appContext)) {
+                        NotificationHelper.onIncomingMessage(appContext, ev)
+                    }
+                }
+                batch.clear()
+            }
+        }
+    }
+
+    private fun getSavedUid(context: Context): Int {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_USER_UID, -1)
     }
 
     fun stopSse() {
         sseJob?.cancel()
         sseJob = null
+        activeSseCall?.cancel()
+        activeSseCall = null
+        isSseConnected = false
     }
 
     private fun handleSseJson(context: Context, serverUrl: String, raw: String, myUid: Int, sseReady: Boolean): Boolean {
@@ -874,11 +1216,15 @@ object SanctuaryCore {
                                 userMap[uid]?.let { userMap[uid] = it.copy(isOnline = online) }
                             }
                         }
-                        _userStateEvents.tryEmit(Unit)
+                        val now = System.currentTimeMillis()
+                        if (now - lastUserStateEmitMs.getAndSet(now) >= 120L || users.length() <= 5) {
+                            _userStateEvents.tryEmit(Unit)
+                        } else {
+                            _userStateEvents.tryEmit(Unit)
+                        }
                     }
                 }
                 "user_settings" -> {
-                    // 同步服务端保存的已读游标到本地！
                     obj.optJSONArray("read_index_groups")?.let { arr ->
                         for (i in 0 until arr.length()) {
                             val item = arr.getJSONObject(i)
@@ -908,51 +1254,62 @@ object SanctuaryCore {
                     val detail = obj.optJSONObject("detail")
                     val contentType = detail?.optString("content_type", "text/plain") ?: "text/plain"
                     val content = parseMessagePreview(detail)
+                    val replyToMid = if (detail?.optString("type") == "reply") detail.optLong("mid", 0L) else 0L
+                    val filePath = if (contentType == "vocechat/file") detail?.optString("content", "") ?: "" else ""
+                    val props = detail?.optJSONObject("properties")
+                    val imgW = props?.optInt("width", 0) ?: 0
+                    val imgH = props?.optInt("height", 0) ?: 0
                     val target = obj.optJSONObject("target") ?: return false
 
                     if (mid <= 0L || fromUid == -1 || content.isBlank()) return false
                     updateGlobalMaxMid(context, myUid, mid)
 
-                    if (target.has("gid")) {
-                        val gid = target.getInt("gid")
-                        val senderName = if (fromUid == myUid) "我" else getDisplayName(fromUid)
-                        SanctuaryDb.getInstance(context).upsertSingleMessage(
-                            serverUrl, myUid, true, gid,
-                            ChatMessage(mid, fromUid, senderName, getAvatarUpdatedAt(fromUid), content, createdAt, fromUid == myUid, contentType)
-                        )
-                        _incomingMessages.tryEmit(
-                            IncomingChatEvent(
-                                mid = mid,
-                                fromUid = fromUid,
-                                isGroup = true,
-                                targetId = gid,
-                                content = content,
-                                contentType = contentType,
-                                createdAt = createdAt,
-                                isRealtime = sseReady
-                            )
-                        )
-                    } else if (target.has("uid")) {
+                    val isGroup = target.has("gid")
+                    val targetId = if (isGroup) target.getInt("gid") else {
                         val targetUid = target.getInt("uid")
-                        val peerUid = if (fromUid == myUid) targetUid else fromUid
-                        val senderName = if (fromUid == myUid) "我" else getDisplayName(fromUid)
-                        SanctuaryDb.getInstance(context).upsertSingleMessage(
-                            serverUrl, myUid, false, peerUid,
-                            ChatMessage(mid, fromUid, senderName, getAvatarUpdatedAt(fromUid), content, createdAt, fromUid == myUid, contentType)
-                        )
-                        _incomingMessages.tryEmit(
-                            IncomingChatEvent(
-                                mid = mid,
-                                fromUid = fromUid,
-                                isGroup = false,
-                                targetId = peerUid,
-                                content = content,
-                                contentType = contentType,
-                                createdAt = createdAt,
-                                isRealtime = sseReady
-                            )
-                        )
+                        if (fromUid == myUid) targetUid else fromUid
                     }
+                    val senderName = if (fromUid == myUid) "我" else getDisplayName(fromUid)
+                    val db = SanctuaryDb.getInstance(context)
+                    val replyPreview = if (replyToMid > 0L) {
+                        db.getMessageContentByMid(serverUrl, myUid, isGroup, targetId, replyToMid)
+                    } else ""
+
+                    db.upsertSingleMessage(
+                        serverUrl, myUid, isGroup, targetId,
+                        ChatMessage(
+                            mid = mid,
+                            fromUid = fromUid,
+                            fromName = senderName,
+                            fromAvatarUpdatedAt = getAvatarUpdatedAt(fromUid),
+                            content = content,
+                            createdAt = createdAt,
+                            isSelf = (fromUid == myUid),
+                            contentType = contentType,
+                            syncStatus = ChatMessage.STATUS_SENT,
+                            replyToMid = replyToMid,
+                            replyPreview = replyPreview,
+                            filePath = filePath,
+                            imageWidth = imgW,
+                            imageHeight = imgH
+                        )
+                    )
+                    sseRawEventChannel.trySend(
+                        IncomingChatEvent(
+                            mid = mid,
+                            fromUid = fromUid,
+                            isGroup = isGroup,
+                            targetId = targetId,
+                            content = content,
+                            contentType = contentType,
+                            createdAt = createdAt,
+                            isRealtime = sseReady,
+                            replyToMid = replyToMid,
+                            filePath = filePath,
+                            imageWidth = imgW,
+                            imageHeight = imgH
+                        )
+                    )
                 }
             }
         } catch (_: Exception) {
@@ -1189,5 +1546,23 @@ object SanctuaryCore {
     fun formatBubbleTime(tsMs: Long): String {
         if (tsMs <= 0L) return ""
         return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(normalizeTimestampMs(tsMs)))
+    }
+
+    fun formatDayKeyAndLabel(tsMs: Long): Pair<String, String> {
+        val ms = normalizeTimestampMs(tsMs)
+        val msgCal = Calendar.getInstance().apply { timeInMillis = ms }
+        val nowCal = Calendar.getInstance()
+        val dayKey = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(msgCal.time)
+        val label = when {
+            msgCal.get(Calendar.YEAR) == nowCal.get(Calendar.YEAR) &&
+                msgCal.get(Calendar.DAY_OF_YEAR) == nowCal.get(Calendar.DAY_OF_YEAR) -> "今天"
+            msgCal.get(Calendar.YEAR) == nowCal.get(Calendar.YEAR) &&
+                nowCal.get(Calendar.DAY_OF_YEAR) - msgCal.get(Calendar.DAY_OF_YEAR) == 1 -> "昨天"
+            msgCal.get(Calendar.YEAR) == nowCal.get(Calendar.YEAR) ->
+                SimpleDateFormat("M月d日", Locale.getDefault()).format(msgCal.time)
+            else ->
+                SimpleDateFormat("yyyy年M月d日", Locale.getDefault()).format(msgCal.time)
+        }
+        return Pair(dayKey, label)
     }
 }
