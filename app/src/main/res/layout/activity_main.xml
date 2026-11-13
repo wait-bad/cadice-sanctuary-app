@@ -10,42 +10,42 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="20dp">
+        android:padding="24dp">
 
-        <!-- 顶部标题区 -->
+        <!-- 顶部高端品牌区 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
             android:orientation="vertical"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="20dp">
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="28dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="🌸"
-                android:textSize="48sp" />
+                android:text="🟣"
+                android:textSize="44sp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="可黛丝的专属通信中枢"
-                android:textColor="#C084FC"
-                android:textSize="22sp"
+                android:text="Violet IM"
+                android:textColor="#F8FAFC"
+                android:textSize="24sp"
                 android:textStyle="bold"
-                android:layout_marginTop="4dp" />
+                android:layout_marginTop="6dp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="VoceChat 通用原生轻信客户端 v1.1.0"
+                android:text="通用轻量级私有云即时通信客户端"
                 android:textColor="#94A3B8"
-                android:textSize="12sp"
-                android:layout_marginTop="2dp" />
+                android:textSize="13sp"
+                android:layout_marginTop="4dp" />
         </LinearLayout>
 
-        <!-- 卡片 1: 服务器接入配置 -->
+        <!-- 卡片 1: 服务器端点设置 -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -65,15 +65,15 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="🌐 服务器连接端点"
+                    android:text="🌐 服务器地址"
                     android:textColor="#E2E8F0"
-                    android:textSize="15sp"
+                    android:textSize="14sp"
                     android:textStyle="bold" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="支持输入任意 VoceChat 服务器，内网明文直连已放行"
+                    android:text="输入您的 VoceChat 服务节点（支持局域网 HTTP 或公网 HTTPS）"
                     android:textColor="#94A3B8"
                     android:textSize="11sp"
                     android:layout_marginBottom="10dp" />
@@ -85,12 +85,12 @@
                     android:background="#0F172A"
                     android:textColor="#F8FAFC"
                     android:textColorHint="#64748B"
-                    android:hint="http://192.168.1.20:3009"
+                    android:hint="https://chat.waitb.sbs 或 http://192.168.1.20:3009"
                     android:textSize="13sp"
                     android:padding="12dp"
                     android:singleLine="true" />
 
-                <!-- 快捷预设按钮 -->
+                <!-- 预设快速切换 -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -98,39 +98,39 @@
                     android:layout_marginTop="8dp">
 
                     <Button
-                        android:id="@+id/btn_quick_local"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_height="36dp"
-                        android:layout_weight="1"
-                        android:text="⚡ 局域网内网"
-                        android:textSize="11sp"
-                        android:padding="0dp"
-                        android:textColor="#38BDF8"
-                        app:strokeColor="#0284C7"
-                        android:layout_marginEnd="6dp" />
-
-                    <Button
                         android:id="@+id/btn_quick_remote"
                         style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                         android:layout_width="0dp"
                         android:layout_height="36dp"
                         android:layout_weight="1"
-                        android:text="🛡️ 公网隧道"
+                        android:text="公网隧道"
                         android:textSize="11sp"
                         android:padding="0dp"
                         android:textColor="#A855F7"
                         app:strokeColor="#7E22CE"
+                        android:layout_marginEnd="6dp" />
+
+                    <Button
+                        android:id="@+id/btn_quick_local"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="局域网内网"
+                        android:textSize="11sp"
+                        android:padding="0dp"
+                        android:textColor="#38BDF8"
+                        app:strokeColor="#0284C7"
                         android:layout_marginStart="6dp" />
                 </LinearLayout>
 
                 <Button
                     android:id="@+id/btn_ping_server"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="38dp"
                     android:layout_marginTop="8dp"
                     android:backgroundTint="#334155"
-                    android:text="⚡ 测速并探测连通性"
+                    android:text="⚡ 探测连通性"
                     android:textColor="#E2E8F0"
                     android:textSize="12sp" />
 
@@ -146,12 +146,11 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 卡片 2: 用户身份认证 -->
+        <!-- 卡片 2: 登录认证 -->
         <com.google.android.material.card.MaterialCardView
-            android:id="@+id/card_login"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="24dp"
             app:cardBackgroundColor="#1E293B"
             app:cardCornerRadius="14dp"
             app:cardElevation="2dp"
@@ -167,18 +166,18 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="🔑 用户身份认证"
+                    android:text="🔑 账号凭证登录"
                     android:textColor="#E2E8F0"
-                    android:textSize="15sp"
+                    android:textSize="14sp"
                     android:textStyle="bold" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="输入您的注册邮箱/账号，凭据将安全加密保存在本地"
+                    android:text="输入您注册的账号邮箱与密码，登录态将安全固化"
                     android:textColor="#94A3B8"
                     android:textSize="11sp"
-                    android:layout_marginBottom="10dp" />
+                    android:layout_marginBottom="12dp" />
 
                 <EditText
                     android:id="@+id/et_email"
@@ -187,7 +186,7 @@
                     android:background="#0F172A"
                     android:textColor="#F8FAFC"
                     android:textColorHint="#64748B"
-                    android:hint="邮箱 / 账号 (如 cotice@sanctuary.local)"
+                    android:hint="注册账号 / 邮箱"
                     android:textSize="13sp"
                     android:padding="12dp"
                     android:singleLine="true" />
@@ -210,120 +209,24 @@
                     android:id="@+id/btn_login"
                     android:layout_width="match_parent"
                     android:layout_height="46dp"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="16dp"
                     android:backgroundTint="#7C3AED"
-                    android:text="✨ 登录进入小窝"
+                    android:text="登录系统"
                     android:textColor="#FFFFFF"
                     android:textSize="14sp"
                     android:textStyle="bold" />
 
-                <!-- 快捷填入提示 -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center"
-                    android:layout_marginTop="10dp">
-
-                    <TextView
-                        android:id="@+id/tv_fill_cotice"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="[填入可蒂丝]"
-                        android:textColor="#F59E0B"
-                        android:textSize="11sp"
-                        android:padding="4dp" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text=" · "
-                        android:textColor="#64748B" />
-
-                    <TextView
-                        android:id="@+id/tv_fill_master"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="[填入主人邮箱]"
-                        android:textColor="#38BDF8"
-                        android:textSize="11sp"
-                        android:padding="4dp" />
-                </LinearLayout>
-
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 卡片 3: 已登录状态区 -->
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/card_logged_in"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            android:visibility="gone"
-            app:cardBackgroundColor="#1E293B"
-            app:cardCornerRadius="14dp"
-            app:cardElevation="2dp"
-            app:strokeColor="#10B981"
-            app:strokeWidth="1dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="🟢 当前身份在线"
-                    android:textColor="#10B981"
-                    android:textSize="15sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tv_user_details"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textColor="#F1F5F9"
-                    android:textSize="13sp"
-                    android:layout_marginTop="8dp"
-                    android:lineSpacingExtra="3dp"
-                    android:text="用户名: --\nUID: --\n身份: --" />
-
-                <Button
-                    android:id="@+id/btn_logout"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="40dp"
-                    android:layout_marginTop="12dp"
-                    android:text="退出当前账号"
-                    android:textColor="#EF4444"
-                    app:strokeColor="#EF4444"
-                    android:textSize="12sp" />
-
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- 底部猫耳彩蛋卡片 -->
-        <Button
-            android:id="@+id/btn_poke"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="戳一下可黛丝的猫耳 ฅ'ω'ฅ"
-            android:textColor="#C084FC"
-            android:textSize="13sp" />
-
+        <!-- 底部版权 -->
         <TextView
-            android:id="@+id/tv_poke_response"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:textColor="#A855F7"
-            android:textSize="12sp"
-            android:layout_marginTop="4dp"
-            android:visibility="gone" />
+            android:textColor="#475569"
+            android:textSize="11sp"
+            android:text="Violet IM · Universal Open Source Client\nBuild v1.2.0" />
 
     </LinearLayout>
 </ScrollView>
