@@ -1,6 +1,20 @@
 # 📜 Violet IM (`cadice-sanctuary-app`) 版本演进与架构改动记录
 
-本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.3` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.4` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+
+---
+
+## ✨ v1.7.4（Build 26 · 极简在线/离线文字 + 刷新防心跳冲突 + QQ 式上拉取消刷新）
+
+### 🔌 1. 彻底解除“刷新误伤心跳导致闪现离线 & 卡死”冲突 (`SanctuaryCore.kt` / `HomeActivity.kt`)
+- **真凶根治**：旧版下拉刷新每次都会触发 `pokeOrRestartSse()`，且在仅 8.5s 未收到新帧时强行执行 `httpClient.connectionPool.evictAll()` + `activeSseCall?.cancel()`，直接把原本健康的 SSE 踢成“离线”，同时打断隧道连接池；此外 `executeAuthorized` 使用阻塞式 `execute()` 导致协程取消时底层请求仍霸占仅有的 4 条并发通道。
+- **修复**：
+  - `executeAuthorized` 全面重写为基于 `suspendCancellableCoroutine` + `call.enqueue()` 的**可瞬间中断异步请求**，取消或超时瞬间立即释放连接池；
+  - 健康 SSE 期间下拉刷新**绝不强杀 SSE 与连接池**；`pokeOrRestartSse` 与看门狗阈值放宽至 `24s / 28s`（`sseClient.readTimeout` 30s），杜绝连续刷新闪退回“离线”。
+
+### 🌸 2. QQ 式上拉随时取消刷新 + 纯文字在线/离线 (`FlowerPullRefreshLayout.kt` / `HomeActivity.kt`)
+- **上拉取消刷新**：在旋转小花刷新中或失败持续旋转期间，只要手指顺手向上一拉即可立刻平滑收起并中止本次后台刷新任务；
+- **极简视觉**：移除顶部“在线/离线”前的小圆点与小花下方的多余文字提示，界面更干净高级。
 
 ---
 

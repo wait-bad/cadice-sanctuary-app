@@ -20,21 +20,24 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.URLEncoder
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -78,7 +81,7 @@ object SanctuaryCore {
 
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(22, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
@@ -642,22 +645,40 @@ object SanctuaryCore {
         }
     }
 
+    private suspend fun executeCallCancellable(req: Request): Pair<Int, String> =
+        suspendCancellableCoroutine { cont ->
+            val call = httpClient.newCall(req)
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) {
+                        cont.resumeWithException(e)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { res ->
+                        val bodyStr = try {
+                            res.body?.string().orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                        if (cont.isActive) {
+                            cont.resume(Pair(res.code, bodyStr))
+                        }
+                    }
+                }
+            })
+        }
+
     suspend fun executeAuthorized(context: Context, requestBuilder: (token: String) -> Request): Pair<Int, String> {
         val token1 = ensureValidToken(context, forceRenew = false) ?: return Pair(401, "")
-        val firstAttempt = withContext(Dispatchers.IO) {
-            httpClient.newCall(requestBuilder(token1)).execute().use { res ->
-                Pair(res.code, res.body?.string().orEmpty())
-            }
-        }
+        val firstAttempt = executeCallCancellable(requestBuilder(token1))
         if (firstAttempt.first != 401) {
             return firstAttempt
         }
         val token2 = ensureValidToken(context, forceRenew = true) ?: return Pair(401, "")
-        return withContext(Dispatchers.IO) {
-            httpClient.newCall(requestBuilder(token2)).execute().use { res ->
-                Pair(res.code, res.body?.string().orEmpty())
-            }
-        }
+        return executeCallCancellable(requestBuilder(token2))
     }
 
     // ==================== 💾 首页列表快照 ====================
@@ -1100,16 +1121,13 @@ object SanctuaryCore {
             startSse(context, serverUrl, myUid)
             return
         }
-        // 若超过 8 秒未收到服务器 5s 心跳包或当前未连接，立刻强制踢一脚重连
-        if (!isSseConnected || (lastSsePacketAt > 0L && now - lastSsePacketAt > 8_500L)) {
-            httpClient.connectionPool.evictAll()
+        // 仅当 SSE 确实断开或超过 24 秒没有任何包/心跳时才唤醒重连，绝不打扰健康的 SSE！
+        if (!isSseConnected && (lastSsePacketAt == 0L || now - lastSsePacketAt > 24_000L)) {
+            sseWakeupChannel.trySend(Unit)
+        } else if (isSseConnected && lastSsePacketAt > 0L && now - lastSsePacketAt > 24_000L) {
             activeSseCall?.cancel()
             sseWakeupChannel.trySend(Unit)
         }
-    }
-
-    fun pauseSseForBackground() {
-        stopSse()
     }
 
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
@@ -1157,8 +1175,8 @@ object SanctuaryCore {
 
                     val watchdogJob = launch {
                         while (isActive) {
-                            delay(5_000L)
-                            if (System.currentTimeMillis() - lastActivityAt.get() > 20_000L) {
+                            delay(6_000L)
+                            if (System.currentTimeMillis() - lastActivityAt.get() > 28_000L) {
                                 call.cancel()
                                 break
                             }

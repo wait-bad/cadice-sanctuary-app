@@ -94,16 +94,15 @@ class HomeActivity : AppCompatActivity() {
         }
         val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
         if (SanctuaryCore.isSseConnected) {
-            tvSubtitle.text = "🟢 在线"
+            tvSubtitle.text = "在线"
             tvSubtitle.setTextColor(Color.parseColor("#10B981"))
         } else {
-            tvSubtitle.text = "🔴 离线"
+            tvSubtitle.text = "离线"
             tvSubtitle.setTextColor(Color.parseColor("#EF4444"))
         }
         val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
         findViewById<TextView>(R.id.tv_drawer_name).text = myName
         findViewById<TextView>(R.id.tv_drawer_server).text = "🌐 $cleanHost (UID: $myUid)"
-
         findViewById<View>(R.id.btn_drawer_theme).setOnClickListener {
             isDarkTheme = !isDarkTheme
             prefs.edit().putBoolean(SanctuaryCore.KEY_DARK_THEME, isDarkTheme).apply()
@@ -125,17 +124,27 @@ class HomeActivity : AppCompatActivity() {
         refreshMoments = findViewById(R.id.refresh_moments)
 
         refreshChats.setOnRefreshListener {
-            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            if (!SanctuaryCore.isSseConnected) {
+                SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            }
             loadData(showSpinner = false, pullLayout = refreshChats)
         }
         refreshContacts.setOnRefreshListener {
-            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            if (!SanctuaryCore.isSseConnected) {
+                SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            }
             loadData(showSpinner = false, pullLayout = refreshContacts)
         }
         refreshMoments.setOnRefreshListener {
-            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            if (!SanctuaryCore.isSseConnected) {
+                SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            }
             loadData(showSpinner = false, pullLayout = refreshMoments)
         }
+        val cancelRefreshAction = { loadDataJob?.cancel(); Unit }
+        refreshChats.setOnCancelListener(cancelRefreshAction)
+        refreshContacts.setOnCancelListener(cancelRefreshAction)
+        refreshMoments.setOnCancelListener(cancelRefreshAction)
         findViewById<MaterialButton>(R.id.btn_home_logout).setOnClickListener {
             logoutToLogin("已退出登录")
         }
@@ -456,10 +465,10 @@ class HomeActivity : AppCompatActivity() {
             val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
             SanctuaryCore.connectionStateEvents.collect { connected ->
                 if (connected) {
-                    tvSubtitle.text = "🟢 在线"
+                    tvSubtitle.text = "在线"
                     tvSubtitle.setTextColor(Color.parseColor("#10B981"))
                 } else {
-                    tvSubtitle.text = "🔴 离线"
+                    tvSubtitle.text = "离线"
                     tvSubtitle.setTextColor(Color.parseColor("#EF4444"))
                 }
             }

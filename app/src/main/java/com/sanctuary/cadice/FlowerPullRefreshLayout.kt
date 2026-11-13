@@ -15,12 +15,14 @@ import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * 🌸 可黛丝的小花下拉刷新容器（仿 QQ 拉开顶栏间距 + 旋转小花 + 成功散落花瓣 + 失败持续旋转）
- * 支持直接包裹 RecyclerView、ScrollView 或任意带滚动子的 LinearLayout，适配三大 Tab！
+ * 🌸 可黛丝的小花下拉刷新容器（仿 QQ 拉开顶栏间距 + 旋转小花 + 成功散落花瓣 + 失败持续旋转 + 随时上拉取消）
+ * - 刷新中或失败旋转时，只要手指上滑即可立即取消本次刷新并丝滑收起；
+ * - 无任何冗余文字提示，纯动画反馈。
  */
 class FlowerPullRefreshLayout @JvmOverloads constructor(
     context: Context,
@@ -31,8 +33,8 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
     enum class State { IDLE, PULLING, REFRESHING, PETAL_FALLING, FAILED_SPINNING }
 
     private val density = resources.displayMetrics.density
-    private val triggerHeightPx = 64f * density
-    private val maxPullPx = 112f * density
+    private val triggerHeightPx = 62f * density
+    private val maxPullPx = 110f * density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val headerView = FlowerRefreshHeaderView(context)
@@ -42,20 +44,17 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
     private var currentOffset = 0f
     private var startY = 0f
     private var startX = 0f
+    private var baseOffsetAtDown = 0f
     private var isDragging = false
 
     private var settleAnimator: ValueAnimator? = null
     private var onRefreshListener: (() -> Unit)? = null
+    private var onCancelListener: (() -> Unit)? = null
 
     init {
-        val headerLp = LayoutParams(LayoutParams.MATCH_PARENT, (80f * density).toInt())
+        val headerLp = LayoutParams(LayoutParams.MATCH_PARENT, (76f * density).toInt())
         addView(headerView, headerLp)
         headerView.visibility = View.INVISIBLE
-        headerView.setOnClickListener {
-            if (state == State.FAILED_SPINNING) {
-                triggerRefreshFromHeader()
-            }
-        }
     }
 
     override fun onFinishInflate() {
@@ -74,15 +73,14 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
         onRefreshListener = listener
     }
 
+    fun setOnCancelListener(listener: () -> Unit) {
+        onCancelListener = listener
+    }
+
     fun setThemeDark(dark: Boolean) {
         headerView.setThemeDark(dark)
     }
 
-    /**
-     * 完成刷新：
-     * - success = true：小花瞬间散成 7 片花瓣飘落渐隐，随后丝滑回弹收起；
-     * - success = false：小花持续旋转保持提示（再次下拉或点击小花可重刷，上滑自动收起）。
-     */
     fun finishRefresh(success: Boolean) {
         if (state != State.REFRESHING && state != State.FAILED_SPINNING) return
         if (success) {
@@ -97,6 +95,17 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
         } else {
             state = State.FAILED_SPINNING
             headerView.setFailedSpinning()
+        }
+    }
+
+    fun cancelRefresh() {
+        if (state == State.IDLE || state == State.PETAL_FALLING) return
+        state = State.IDLE
+        isDragging = false
+        onCancelListener?.invoke()
+        headerView.resetToIdle()
+        animateOffsetTo(0f) {
+            headerView.visibility = View.INVISIBLE
         }
     }
 
@@ -130,23 +139,27 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 startY = ev.y
                 startX = ev.x
+                baseOffsetAtDown = currentOffset
                 isDragging = false
             }
             MotionEvent.ACTION_MOVE -> {
                 val dy = ev.y - startY
                 val dx = ev.x - startX
-                if (state == State.FAILED_SPINNING && dy < -touchSlop && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
-                    // 失败持续旋转状态下，用户主动往上滑列表则收起头部恢复正常阅读
-                    state = State.IDLE
-                    headerView.resetToIdle()
-                    animateOffsetTo(0f) { headerView.visibility = View.INVISIBLE }
+                if (abs(dy) <= touchSlop || abs(dy) <= abs(dx) * 1.15f) {
                     return false
                 }
-                if (dy > touchSlop && kotlin.math.abs(dy) > kotlin.math.abs(dx) * 1.2f &&
-                    !canChildScrollUp() && (state == State.IDLE || state == State.FAILED_SPINNING)
-                ) {
+                // 1. 刷新中或失败旋转中，只要上拉立刻拦截跟手取消！
+                if ((state == State.REFRESHING || state == State.FAILED_SPINNING) && dy < -touchSlop) {
                     isDragging = true
                     startY = ev.y
+                    baseOffsetAtDown = currentOffset
+                    return true
+                }
+                // 2. 顶部下拉触发（含失败状态下再下拉重刷）
+                if (dy > touchSlop && !canChildScrollUp() && (state == State.IDLE || state == State.FAILED_SPINNING)) {
+                    isDragging = true
+                    startY = ev.y
+                    baseOffsetAtDown = currentOffset
                     return true
                 }
             }
@@ -158,23 +171,36 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 if (!isDragging) return true
-                val rawDy = (event.y - startY).coerceAtLeast(0f)
-                // QQ 橡皮筋阻尼拉开
-                val damped = (rawDy * 0.48f).coerceAtMost(maxPullPx)
-                if (state != State.FAILED_SPINNING) {
-                    state = State.PULLING
-                    headerView.setPullProgress((damped / triggerHeightPx).coerceIn(0f, 1.4f))
+                val deltaY = event.y - startY
+                val targetOffset = (baseOffsetAtDown + deltaY * 0.52f).coerceIn(0f, maxPullPx)
+
+                if ((state == State.REFRESHING || state == State.FAILED_SPINNING) && deltaY < -12f * density) {
+                    // 跟随手指上拉并即时进入取消预览
+                    applyOffset(targetOffset)
+                    if (targetOffset <= triggerHeightPx * 0.45f) {
+                        cancelRefresh()
+                    }
+                    return true
                 }
-                applyOffset(damped)
+
+                if (state == State.IDLE || state == State.PULLING) {
+                    state = State.PULLING
+                    headerView.setPullProgress((targetOffset / triggerHeightPx).coerceIn(0f, 1.4f))
+                }
+                applyOffset(targetOffset)
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (isDragging) {
                     isDragging = false
-                    if (currentOffset >= triggerHeightPx) {
+                    if (state == State.REFRESHING || state == State.FAILED_SPINNING) {
+                        if (currentOffset < triggerHeightPx * 0.72f) {
+                            cancelRefresh()
+                        } else {
+                            animateOffsetTo(triggerHeightPx)
+                        }
+                    } else if (currentOffset >= triggerHeightPx) {
                         triggerRefreshFromHeader()
-                    } else if (state == State.FAILED_SPINNING) {
-                        animateOffsetTo(triggerHeightPx)
                     } else {
                         state = State.IDLE
                         animateOffsetTo(0f) {
@@ -204,7 +230,7 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
     private fun animateOffsetTo(target: Float, onEnd: (() -> Unit)? = null) {
         settleAnimator?.cancel()
         settleAnimator = ValueAnimator.ofFloat(currentOffset, target).apply {
-            duration = 240L
+            duration = 220L
             interpolator = DecelerateInterpolator()
             addUpdateListener { anim ->
                 applyOffset(anim.animatedValue as Float)
@@ -218,13 +244,6 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
         }
     }
 
-    /**
-     * 🌸 自绘五瓣樱花动画头：
-     * - 下拉随距离舒展与微旋；
-     * - 刷新中持续顺时针旋转；
-     * - 成功时花朵分解为 7 片零散花瓣优雅飘落滑散；
-     * - 失败时变红/紫持续旋转提示（支持点击或再拉重试）。
-     */
     private class FlowerRefreshHeaderView(context: Context) : View(context) {
 
         private data class FallingPetal(
@@ -250,10 +269,6 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
 
         private val petalPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textAlign = Paint.Align.CENTER
-            textSize = 11f * resources.displayMetrics.density
-        }
         private val petalPath = Path()
 
         fun setThemeDark(dark: Boolean) {
@@ -329,7 +344,7 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
                 )
             }
             fallAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 780L
+                duration = 760L
                 interpolator = DecelerateInterpolator()
                 addUpdateListener {
                     fallProgress = it.animatedValue as Float
@@ -364,10 +379,9 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
             super.onDraw(canvas)
             val d = resources.displayMetrics.density
             val cx = width / 2f
-            val cy = height / 2f - 4f * d
+            val cy = height / 2f
 
             if (mode == 1) {
-                // 成功：花朵散成零散花瓣慢慢滑落飘散
                 val alpha = ((1f - fallProgress) * 255f).toInt().coerceIn(0, 255)
                 for (p in fallingPetals) {
                     val px = cx + p.startX + p.vx * fallProgress
@@ -401,11 +415,6 @@ class FlowerPullRefreshLayout @JvmOverloads constructor(
             centerPaint.color = if (mode == 2) Color.parseColor("#FDE047") else Color.parseColor("#FEF08A")
             canvas.drawCircle(0f, 0f, 3.3f * d, centerPaint)
             canvas.restore()
-
-            if (mode == 2) {
-                hintPaint.color = if (isDark) Color.parseColor("#FDA4AF") else Color.parseColor("#E11D48")
-                canvas.drawText("连接未恢复 · 点击或上滑继续", cx, cy + 22f * d, hintPaint)
-            }
         }
 
         private fun drawSinglePetal(canvas: Canvas, len: Float) {
