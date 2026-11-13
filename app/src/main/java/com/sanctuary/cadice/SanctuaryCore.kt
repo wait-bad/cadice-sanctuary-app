@@ -15,7 +15,9 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -62,9 +64,10 @@ object SanctuaryCore {
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .dispatcher(sharedDispatcher)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(14, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
                 .header("User-Agent", "VioletIM/1.7 (Android; Mobile)")
@@ -119,9 +122,8 @@ object SanctuaryCore {
     private val _authExpiredEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val authExpiredEvents = _authExpiredEvents.asSharedFlow()
 
-    private val _connectionStateEvents = MutableSharedFlow<Boolean>(extraBufferCapacity = 8)
-    val connectionStateEvents = _connectionStateEvents.asSharedFlow()
-
+    private val _connectionStateEvents = MutableStateFlow(false)
+    val connectionStateEvents = _connectionStateEvents.asStateFlow()
     private var sseJob: Job? = null
     private var sseCollectorJob: Job? = null
     @Volatile
@@ -198,7 +200,7 @@ object SanctuaryCore {
                     isNetworkValidated = stillHasNet
                     if (!stillHasNet) {
                         isSseConnected = false
-                        _connectionStateEvents.tryEmit(false)
+                        _connectionStateEvents.value = false
                         activeSseCall?.cancel()
                     }
                 }
@@ -706,11 +708,17 @@ object SanctuaryCore {
 
     // ==================== ⚡ 基础名录 & 增量摘要拉取 ====================
 
+    data class DirectoryResult(
+        val networkOk: Boolean,
+        val conversations: List<ConversationItem>,
+        val contacts: List<ConversationItem>
+    )
+
     suspend fun fetchBaseDirectory(
         context: Context,
         serverUrl: String,
         myUid: Int
-    ): Pair<List<ConversationItem>, List<ConversationItem>> = withContext(Dispatchers.IO) {
+    ): DirectoryResult = withContext(Dispatchers.IO) {
         ensureValidToken(context, forceRenew = false)
 
         coroutineScope {
@@ -736,6 +744,7 @@ object SanctuaryCore {
 
             val groupsJob = async {
                 val list = mutableListOf<ConversationItem>()
+                var ok = false
                 try {
                     val (code, body) = executeAuthorized(context) { tk ->
                         Request.Builder()
@@ -745,6 +754,7 @@ object SanctuaryCore {
                             .build()
                     }
                     if (code in 200..299 && body.startsWith("[")) {
+                        ok = true
                         val groups = JSONArray(body)
                         for (i in 0 until groups.length()) {
                             val g = groups.getJSONObject(i)
@@ -767,7 +777,7 @@ object SanctuaryCore {
                     }
                 } catch (_: Exception) {
                 }
-                list
+                Pair(ok, list)
             }
 
             val contactsJob = async {
@@ -795,9 +805,13 @@ object SanctuaryCore {
                 friendUids
             }
 
-            usersJob.await()
-            val groupItems = groupsJob.await()
+            val usersOk = usersJob.await()
+            val (groupsOk, groupItems) = groupsJob.await()
             val friendUids = contactsJob.await()
+
+            if (!usersOk && !groupsOk) {
+                return@coroutineScope DirectoryResult(false, emptyList(), emptyList())
+            }
 
             val memberItems = mutableListOf<ConversationItem>()
             val addedUids = HashSet<Int>()
@@ -841,7 +855,7 @@ object SanctuaryCore {
                 }
 
             val allContacts = groupItems + memberItems
-            Pair(allContacts, allContacts)
+            DirectoryResult(true, allContacts, allContacts)
         }
     }
 
@@ -1109,11 +1123,10 @@ object SanctuaryCore {
             while (isActive) {
                 if (!isNetworkValidated) {
                     isSseConnected = false
-                    _connectionStateEvents.tryEmit(false)
+                    _connectionStateEvents.value = false
                     withTimeoutOrNull(3000L) {
                         sseWakeupChannel.receive()
                     }
-                    continue
                 }
 
                 try {
@@ -1157,11 +1170,10 @@ object SanctuaryCore {
                             if (response.isSuccessful) {
                                 backoffMs = 1000L
                                 isSseConnected = true
-                                _connectionStateEvents.tryEmit(true)
+                                _connectionStateEvents.value = true
                                 val source = response.body?.source()
                                 while (isActive && source != null && !source.exhausted()) {
                                     val line = source.readUtf8Line() ?: break
-                                    val now = System.currentTimeMillis()
                                     lastActivityAt.set(now)
                                     lastSsePacketAt = now
                                     if (line.startsWith("data:")) {
@@ -1184,11 +1196,9 @@ object SanctuaryCore {
                     break
                 } catch (_: Exception) {
                 }
-
                 isSseConnected = false
-                _connectionStateEvents.tryEmit(false)
+                _connectionStateEvents.value = false
                 if (!isActive) break
-
                 withTimeoutOrNull(backoffMs) {
                     sseWakeupChannel.receive()
                 }
@@ -1237,8 +1247,8 @@ object SanctuaryCore {
         activeSseCall?.cancel()
         activeSseCall = null
         isSseConnected = false
+        _connectionStateEvents.value = false
     }
-
     private fun handleSseJson(context: Context, serverUrl: String, raw: String, myUid: Int, sseReady: Boolean): Boolean {
         try {
             val obj = JSONObject(raw)

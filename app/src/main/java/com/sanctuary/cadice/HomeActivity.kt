@@ -22,7 +22,10 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 class HomeActivity : AppCompatActivity() {
 
@@ -43,10 +46,9 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var refreshChats: FlowerPullRefreshLayout
     private lateinit var refreshContacts: FlowerPullRefreshLayout
     private lateinit var refreshMoments: FlowerPullRefreshLayout
+    private var loadDataJob: Job? = null
 
     private var activeIsGroup: Boolean? = null
-    private var activeTargetId: Int = -1
-
     private val requestNotifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
@@ -89,11 +91,15 @@ class HomeActivity : AppCompatActivity() {
         findViewById<View>(R.id.btn_open_drawer_title).setOnClickListener {
             drawerLayout.openDrawer(GravityCompat.START)
         }
-
         val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
+        if (SanctuaryCore.isSseConnected) {
+            tvSubtitle.text = "🟢 在线"
+            tvSubtitle.setTextColor(Color.parseColor("#10B981"))
+        } else {
+            tvSubtitle.text = "🔴 离线"
+            tvSubtitle.setTextColor(Color.parseColor("#EF4444"))
+        }
         val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
-        tvSubtitle.text = "🟢 $myName · $cleanHost"
-
         findViewById<TextView>(R.id.tv_drawer_name).text = myName
         findViewById<TextView>(R.id.tv_drawer_server).text = "🌐 $cleanHost (UID: $myUid)"
 
@@ -447,20 +453,18 @@ class HomeActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
-            val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
             SanctuaryCore.connectionStateEvents.collect { connected ->
                 if (connected) {
-                    tvSubtitle.text = "🟢 $myName · $cleanHost"
+                    tvSubtitle.text = "🟢 在线"
                     tvSubtitle.setTextColor(Color.parseColor("#10B981"))
                 } else {
-                    tvSubtitle.text = "🟠 网络重连中 · $cleanHost"
-                    tvSubtitle.setTextColor(Color.parseColor("#F59E0B"))
+                    tvSubtitle.text = "🔴 离线"
+                    tvSubtitle.setTextColor(Color.parseColor("#EF4444"))
                 }
             }
         }
         lifecycleScope.launch {
             SanctuaryCore.userStateEvents.collect {
-                updateMyAvatars()
                 SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl)
 
                 var changed = false
@@ -611,68 +615,78 @@ class HomeActivity : AppCompatActivity() {
         }
         tvEmpty.visibility = View.GONE
 
-        lifecycleScope.launch {
+        loadDataJob?.cancel()
+        loadDataJob = lifecycleScope.launch {
             var refreshOk = false
             try {
-                val (baseConvs, contacts) = SanctuaryCore.fetchBaseDirectory(
-                    context = this@HomeActivity,
-                    serverUrl = serverUrl,
-                    myUid = myUid
-                )
-
-                val oldMap = conversationList.associateBy { Pair(it.isGroup, it.id) }
-                val mergedBase = baseConvs.map { item ->
-                    val prev = oldMap[Pair(item.isGroup, item.id)]
-                    if (prev != null && (prev.lastMid > item.lastMid || prev.lastTime > item.lastTime)) {
-                        item.copy(
-                            lastMsg = prev.lastMsg,
-                            lastTime = prev.lastTime,
-                            lastMid = prev.lastMid,
-                            unreadCount = prev.unreadCount
-                        )
-                    } else {
-                        item
+                // 硬超时 12 秒保护：杜绝 Cloudflare 隧道或连接池拥堵导致转圈 2~3 分钟！
+                withTimeout(12_000L) {
+                    val dirResult = SanctuaryCore.fetchBaseDirectory(
+                        context = this@HomeActivity,
+                        serverUrl = serverUrl,
+                        myUid = myUid
+                    )
+                    if (!dirResult.networkOk) {
+                        throw IllegalStateException("服务器连接超时或不可达")
                     }
-                }.sortedWith(
-                    compareByDescending<ConversationItem> { it.lastTime }
-                        .thenByDescending { it.isGroup }
-                        .thenByDescending { it.badge == "好友" }
-                        .thenBy { it.id }
-                )
 
-                if (mergedBase.isNotEmpty()) {
-                    conversationList.clear()
-                    conversationList.addAll(reconcileUnreadWithLocalCursor(mergedBase))
-                    contactList.clear()
-                    contactList.addAll(contacts)
+                    val oldMap = conversationList.associateBy { Pair(it.isGroup, it.id) }
+                    val mergedBase = dirResult.conversations.map { item ->
+                        val prev = oldMap[Pair(item.isGroup, item.id)]
+                        if (prev != null && (prev.lastMid > item.lastMid || prev.lastTime > item.lastTime)) {
+                            item.copy(
+                                lastMsg = prev.lastMsg,
+                                lastTime = prev.lastTime,
+                                lastMid = prev.lastMid,
+                                unreadCount = prev.unreadCount
+                            )
+                        } else {
+                            item
+                        }
+                    }.sortedWith(
+                        compareByDescending<ConversationItem> { it.lastTime }
+                            .thenByDescending { it.isGroup }
+                            .thenByDescending { it.badge == "好友" }
+                            .thenBy { it.id }
+                    )
+
+                    if (mergedBase.isNotEmpty()) {
+                        conversationList.clear()
+                        conversationList.addAll(reconcileUnreadWithLocalCursor(mergedBase))
+                        contactList.clear()
+                        contactList.addAll(dirResult.contacts)
+                    }
+
+                    pbLoading.visibility = View.GONE
+                    updateMyAvatars()
+                    updateContactsHeaderCount()
+
+                    conversationAdapter.notifyDataSetChanged()
+                    contactAdapter.notifyDataSetChanged()
+
+                    if (conversationList.isEmpty()) {
+                        tvEmpty.visibility = View.VISIBLE
+                    }
+
+                    val hydrated = withTimeoutOrNull(7_000L) {
+                        SanctuaryCore.hydrateLatestPreviews(
+                            context = this@HomeActivity,
+                            serverUrl = serverUrl,
+                            myUid = myUid,
+                            items = conversationList.toList()
+                        )
+                    }
+                    if (hydrated != null) {
+                        val finalConvs = reconcileUnreadWithLocalCursor(hydrated)
+                        conversationList.clear()
+                        conversationList.addAll(finalConvs)
+                        conversationAdapter.notifyDataSetChanged()
+                        SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, finalConvs)
+                    }
+                    // 等刷新主链路完成后再预热头像，避免抢占隧道的 4 条并发通道
+                    SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl)
                     refreshOk = true
                 }
-
-                pbLoading.visibility = View.GONE
-                updateMyAvatars()
-                updateContactsHeaderCount()
-                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl)
-
-                conversationAdapter.notifyDataSetChanged()
-                contactAdapter.notifyDataSetChanged()
-
-                if (conversationList.isEmpty()) {
-                    tvEmpty.visibility = View.VISIBLE
-                }
-
-                val hydrated = SanctuaryCore.hydrateLatestPreviews(
-                    context = this@HomeActivity,
-                    serverUrl = serverUrl,
-                    myUid = myUid,
-                    items = conversationList.toList()
-                )
-                val finalConvs = reconcileUnreadWithLocalCursor(hydrated)
-
-                conversationList.clear()
-                conversationList.addAll(finalConvs)
-                conversationAdapter.notifyDataSetChanged()
-
-                SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, finalConvs)
             } catch (e: Exception) {
                 refreshOk = false
                 if (pullLayout == null) {

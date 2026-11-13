@@ -84,9 +84,8 @@
                 <TextView
                     android:id="@+id/tv_home_subtitle"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="🟢 已连接 · 在线"
-                    android:textColor="#10B981"
+                    android:text="🔴 离线"
+                    android:textColor="#EF4444"
                     android:textSize="11sp"
                     android:singleLine="true"
                     android:ellipsize="end" />

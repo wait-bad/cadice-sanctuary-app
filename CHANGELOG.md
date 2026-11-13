@@ -1,6 +1,19 @@
 # 📜 Violet IM (`cadice-sanctuary-app`) 版本演进与架构改动记录
 
-本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.2` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.3` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+
+---
+
+## 🛡️ v1.7.3（Build 23 · 刷新防卡死硬超时 + 纯净在线/离线状态栏）
+
+### ⏱️ 1. 彻底根治“刷新偶发转圈 2~3 分钟”问题 (`SanctuaryCore.kt` / `HomeActivity.kt`)
+- **全局 `callTimeout(14s)`**：为 `httpClient` 补上 14 秒单次调用总超时（连带连接超时缩至 8s、读超时缩至 12s），防止隧道半死连接拖垮请求；
+- **12 秒刷新硬熔断 + 并发防拥堵**：`HomeActivity.loadData()` 加入旧任务取消 (`loadDataJob?.cancel()`) 与 `withTimeout(12_000L)` 硬超时，摘要补齐限定 7 秒内完成；头像预热移至主刷新链路完成之后，不再抢占仅有的 4 条隧道并发通道；
+- **真实网络状态反馈**：`fetchBaseDirectory` 显式返回 `networkOk` 状态，失败时小花正确进入警示旋转态而不再卡死。
+
+### 🟢 2. 顶部状态栏极简化 (`HomeActivity.kt` / `SanctuaryCore.kt`)
+- 移除冗余的 `用户名 · 域名`，顶部栏实时显示 **`🟢 在线`** / **`🔴 离线`**；
+- 将 `connectionStateEvents` 升级为 `StateFlow<Boolean>`，确保页面切换或初始化瞬间也能立即反映真实连线状态。
 
 ---
 
