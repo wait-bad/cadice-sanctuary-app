@@ -49,8 +49,12 @@ object SanctuaryCore {
     val userMap = ConcurrentHashMap<Int, UserProfile>()
     val onlineMap = ConcurrentHashMap<Int, Boolean>()
 
-    // 内存头像缓存 (最多存 80 张缩放后头像)
-    private val avatarMemoryCache = LruCache<String, Bitmap>(80)
+    // 内存头像缓存 (最多存 100 张缩放后头像)
+    private val avatarMemoryCache = LruCache<String, Bitmap>(100)
+
+    // 进行中的头像下载任务去重合并表 (In-Flight Deduplication)，防止同头像并发重复拉取堵死隧道
+    private val inFlightAvatars = ConcurrentHashMap<String, Deferred<Bitmap?>>()
+    private val coreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // 全局实时事件总线
     private val _incomingMessages = MutableSharedFlow<IncomingChatEvent>(extraBufferCapacity = 64)
@@ -63,7 +67,7 @@ object SanctuaryCore {
     private val sseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun getDisplayName(uid: Int): String {
-        return userMap[uid]?.name?.takeIf { it.isNotBlank() } ?: "用户 $uid"
+        return userMap[uid]?.name?.takeIf { it.isNotBlank() } ?: "用户 #$uid"
     }
 
     fun getAvatarUpdatedAt(uid: Int): Long {
@@ -74,140 +78,256 @@ object SanctuaryCore {
         return onlineMap[uid] == true || userMap[uid]?.isOnline == true
     }
 
-    fun clearSessionCache() {
+    fun clearSessionCache(context: Context? = null) {
         stopSse()
         userMap.clear()
         onlineMap.clear()
+        inFlightAvatars.clear()
+        context?.let {
+            File(it.cacheDir, "snapshot_home.json").delete()
+        }
     }
 
-    // 📥 从服务器同步全部用户信息、群组与联系人并聚合最后一条消息
-    suspend fun syncAllAndBuildLists(
+    // 💾 读取本地列表快照（0ms 秒开首屏）
+    fun loadHomeSnapshot(context: Context): Pair<List<ConversationItem>, List<ConversationItem>>? {
+        return try {
+            val file = File(context.cacheDir, "snapshot_home.json")
+            if (!file.exists()) return null
+            val root = JSONObject(file.readText())
+            val usersArr = root.optJSONArray("users")
+            if (usersArr != null) {
+                for (i in 0 until usersArr.length()) {
+                    putUserJson(usersArr.getJSONObject(i))
+                }
+            }
+            val convs = jsonToItems(root.optJSONArray("conversations"))
+            val contacts = jsonToItems(root.optJSONArray("contacts"))
+            if (convs.isEmpty() && contacts.isEmpty()) null else Pair(convs, contacts)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun saveHomeSnapshot(
+        context: Context,
+        conversations: List<ConversationItem>,
+        contacts: List<ConversationItem>
+    ) {
+        coreScope.launch {
+            try {
+                val root = JSONObject()
+                val usersArr = JSONArray()
+                userMap.values.forEach { u ->
+                    usersArr.put(JSONObject().apply {
+                        put("uid", u.uid)
+                        put("name", u.name)
+                        put("email", u.email)
+                        put("avatar_updated_at", u.avatarUpdatedAt)
+                        put("is_admin", u.isAdmin)
+                        put("is_bot", u.isBot)
+                    })
+                }
+                root.put("users", usersArr)
+                root.put("conversations", itemsToJson(conversations))
+                root.put("contacts", itemsToJson(contacts))
+                File(context.cacheDir, "snapshot_home.json").writeText(root.toString())
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun itemsToJson(list: List<ConversationItem>): JSONArray {
+        val arr = JSONArray()
+        list.forEach { item ->
+            arr.put(JSONObject().apply {
+                put("id", item.id)
+                put("isGroup", item.isGroup)
+                put("name", item.name)
+                put("description", item.description)
+                put("lastMsg", item.lastMsg)
+                put("lastTime", item.lastTime)
+                put("unreadCount", item.unreadCount)
+                put("avatarUpdatedAt", item.avatarUpdatedAt)
+                put("badge", item.badge)
+            })
+        }
+        return arr
+    }
+
+    private fun jsonToItems(arr: JSONArray?): List<ConversationItem> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<ConversationItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val isGroup = o.optBoolean("isGroup", false)
+            val id = o.getInt("id")
+            list.add(
+                ConversationItem(
+                    id = id,
+                    isGroup = isGroup,
+                    name = o.optString("name", ""),
+                    description = o.optString("description", ""),
+                    lastMsg = o.optString("lastMsg", ""),
+                    lastTime = o.optLong("lastTime", 0L),
+                    unreadCount = o.optInt("unreadCount", 0),
+                    avatarUpdatedAt = o.optLong("avatarUpdatedAt", 0L),
+                    isOnline = if (isGroup) false else isUserOnline(id),
+                    badge = o.optString("badge", if (isGroup) "群聊" else "好友")
+                )
+            )
+        }
+        return list
+    }
+
+    // ⚡ 阶段一：三路并发拉取全员用户表、群组、好友联系人（不等历史消息，立刻构建完整名录！）
+    suspend fun fetchBaseDirectory(
         serverUrl: String,
         token: String,
         myUid: Int
     ): Pair<List<ConversationItem>, List<ConversationItem>> = withContext(Dispatchers.IO) {
-        // 1. 拉取全员用户表 (/api/user)
-        try {
-            val userReq = Request.Builder()
-                .url("$serverUrl/api/user")
-                .header("X-API-Key", token)
-                .get()
-                .build()
-            httpClient.newCall(userReq).execute().use { res ->
-                val body = res.body?.string().orEmpty()
-                if (res.isSuccessful && body.startsWith("[")) {
-                    parseUsersArray(JSONArray(body))
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        // 2. 拉取群组列表 (/api/group)
-        val groupItems = mutableListOf<ConversationItem>()
-        try {
-            val groupReq = Request.Builder()
-                .url("$serverUrl/api/group")
-                .header("X-API-Key", token)
-                .get()
-                .build()
-            httpClient.newCall(groupReq).execute().use { res ->
-                val body = res.body?.string().orEmpty()
-                if (res.isSuccessful && body.startsWith("[")) {
-                    val groups = JSONArray(body)
-                    for (i in 0 until groups.length()) {
-                        val g = groups.getJSONObject(i)
-                        val gid = g.getInt("gid")
-                        val name = g.optString("name", "群聊 $gid")
-                        val desc = g.optString("description", "群聊频道").ifBlank { "群聊频道" }
-                        val avatarUpdatedAt = g.optLong("avatar_updated_at", 0L)
-                        groupItems.add(
-                            ConversationItem(
-                                id = gid,
-                                isGroup = true,
-                                name = name,
-                                description = desc,
-                                lastMsg = desc,
-                                avatarUpdatedAt = avatarUpdatedAt,
-                                badge = "群聊"
-                            )
-                        )
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        // 3. 拉取联系人列表 (/api/user/contacts)
-        val friendItems = mutableListOf<ConversationItem>()
-        val seenFriendIds = HashSet<Int>()
-        try {
-            val contactReq = Request.Builder()
-                .url("$serverUrl/api/user/contacts")
-                .header("X-API-Key", token)
-                .get()
-                .build()
-            httpClient.newCall(contactReq).execute().use { res ->
-                val body = res.body?.string().orEmpty()
-                if (res.isSuccessful && body.startsWith("[")) {
-                    val contacts = JSONArray(body)
-                    for (i in 0 until contacts.length()) {
-                        val c = contacts.getJSONObject(i)
-                        val targetUid = c.optInt("target_uid", -1)
-                        if (targetUid == -1 || targetUid == myUid) continue
-                        seenFriendIds.add(targetUid)
-
-                        val targetInfo = c.optJSONObject("target_info")
-                        if (targetInfo != null) {
-                            putUserJson(targetInfo)
+        coroutineScope {
+            val usersJob = async {
+                try {
+                    val req = Request.Builder()
+                        .url("$serverUrl/api/user")
+                        .header("X-API-Key", token)
+                        .get()
+                        .build()
+                    httpClient.newCall(req).execute().use { res ->
+                        val body = res.body?.string().orEmpty()
+                        if (res.isSuccessful && body.startsWith("[")) {
+                            parseUsersArray(JSONArray(body))
                         }
-                        val profile = userMap[targetUid]
-                        val name = profile?.name ?: targetInfo?.optString("name", "用户 $targetUid") ?: "用户 $targetUid"
-                        val email = profile?.email ?: targetInfo?.optString("email", "") ?: ""
-                        val avatarUpdated = profile?.avatarUpdatedAt ?: targetInfo?.optLong("avatar_updated_at", 0L) ?: 0L
-
-                        friendItems.add(
-                            ConversationItem(
-                                id = targetUid,
-                                isGroup = false,
-                                name = name,
-                                description = email.ifEmpty { "VoceChat 好友" },
-                                lastMsg = "点击开始私聊",
-                                avatarUpdatedAt = avatarUpdated,
-                                isOnline = isUserOnline(targetUid),
-                                badge = "好友"
-                            )
-                        )
                     }
+                } catch (_: Exception) {
                 }
             }
-        } catch (_: Exception) {
-        }
 
-        // 若联系人接口为空但全局用户表有其他非 Bot 真实用户，补充展示到联系人列表方便开聊
-        if (friendItems.isEmpty() && userMap.isNotEmpty()) {
-            userMap.values.filter { it.uid != myUid && !it.isBot }.sortedBy { it.uid }.forEach { u ->
-                if (seenFriendIds.add(u.uid)) {
-                    friendItems.add(
+            val groupsJob = async {
+                val list = mutableListOf<ConversationItem>()
+                try {
+                    val req = Request.Builder()
+                        .url("$serverUrl/api/group")
+                        .header("X-API-Key", token)
+                        .get()
+                        .build()
+                    httpClient.newCall(req).execute().use { res ->
+                        val body = res.body?.string().orEmpty()
+                        if (res.isSuccessful && body.startsWith("[")) {
+                            val groups = JSONArray(body)
+                            for (i in 0 until groups.length()) {
+                                val g = groups.getJSONObject(i)
+                                val gid = g.getInt("gid")
+                                val name = g.optString("name", "群聊 #$gid").ifBlank { "群聊 #$gid" }
+                                val desc = g.optString("description", "群聊频道").ifBlank { "群聊频道" }
+                                val avatarUpdatedAt = g.optLong("avatar_updated_at", 0L)
+                                list.add(
+                                    ConversationItem(
+                                        id = gid,
+                                        isGroup = true,
+                                        name = name,
+                                        description = desc,
+                                        lastMsg = desc,
+                                        avatarUpdatedAt = avatarUpdatedAt,
+                                        badge = "群聊"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+                list
+            }
+
+            val contactsJob = async {
+                val friendUids = HashSet<Int>()
+                try {
+                    val req = Request.Builder()
+                        .url("$serverUrl/api/user/contacts")
+                        .header("X-API-Key", token)
+                        .get()
+                        .build()
+                    httpClient.newCall(req).execute().use { res ->
+                        val body = res.body?.string().orEmpty()
+                        if (res.isSuccessful && body.startsWith("[")) {
+                            val contacts = JSONArray(body)
+                            for (i in 0 until contacts.length()) {
+                                val c = contacts.getJSONObject(i)
+                                val targetUid = c.optInt("target_uid", -1)
+                                if (targetUid == -1 || targetUid == myUid) continue
+                                friendUids.add(targetUid)
+                                c.optJSONObject("target_info")?.let { putUserJson(it) }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+                friendUids
+            }
+
+            usersJob.await()
+            val groupItems = groupsJob.await()
+            val friendUids = contactsJob.await()
+
+            // 构建完整联系人名录：群聊 + 好友 + 服务器全部其他成员（绝不漏掉任何一个账户！）
+            val memberItems = mutableListOf<ConversationItem>()
+            val addedUids = HashSet<Int>()
+
+            // 1) 优先放好友
+            friendUids.sorted().forEach { uid ->
+                addedUids.add(uid)
+                val u = userMap[uid]
+                val displayName = u?.name?.takeIf { it.isNotBlank() } ?: "用户 #$uid"
+                memberItems.add(
+                    ConversationItem(
+                        id = uid,
+                        isGroup = false,
+                        name = displayName,
+                        description = u?.email?.ifEmpty { "VoceChat 好友" } ?: "VoceChat 好友",
+                        lastMsg = "点击发起私聊",
+                        avatarUpdatedAt = u?.avatarUpdatedAt ?: 0L,
+                        isOnline = isUserOnline(uid),
+                        badge = "好友"
+                    )
+                )
+            }
+
+            // 2) 补齐服务器其余所有非 Bot 成员（即使还没加好友也能看到并直接开聊！）
+            userMap.values
+                .filter { it.uid != myUid && !it.isBot && !addedUids.contains(it.uid) }
+                .sortedBy { it.uid }
+                .forEach { u ->
+                    addedUids.add(u.uid)
+                    val displayName = u.name.ifBlank { "用户 #${u.uid}" }
+                    memberItems.add(
                         ConversationItem(
                             id = u.uid,
                             isGroup = false,
-                            name = u.name,
+                            name = displayName,
                             description = u.email.ifEmpty { "成员 #${u.uid}" },
-                            lastMsg = "点击开始私聊",
+                            lastMsg = "点击发起私聊",
                             avatarUpdatedAt = u.avatarUpdatedAt,
                             isOnline = isUserOnline(u.uid),
                             badge = if (u.isAdmin) "管理" else "成员"
                         )
                     )
                 }
-            }
+
+            val allContacts = groupItems + memberItems
+            val baseConversations = groupItems + memberItems
+            Pair(baseConversations, allContacts)
         }
+    }
 
-        val allRaw = groupItems + friendItems
-
-        // 4. 并发拉取每个会话的最新一条消息，填充会话列表摘要与时间戳
-        val hydratedConversations = coroutineScope {
-            allRaw.map { item ->
+    // ⚡ 阶段二：后台并发补全每个会话的最新一条消息摘要，不阻塞首屏显示
+    suspend fun hydrateLatestPreviews(
+        serverUrl: String,
+        token: String,
+        items: List<ConversationItem>
+    ): List<ConversationItem> = withContext(Dispatchers.IO) {
+        coroutineScope {
+            items.map { item ->
                 async {
                     fetchLatestPreview(serverUrl, token, item)
                 }
@@ -215,14 +335,9 @@ object SanctuaryCore {
         }.sortedWith(
             compareByDescending<ConversationItem> { it.lastTime }
                 .thenByDescending { it.isGroup }
+                .thenByDescending { it.badge == "好友" }
                 .thenBy { it.id }
         )
-
-        val contactsSorted = allRaw.map { item ->
-            if (item.isGroup) item else item.copy(isOnline = isUserOnline(item.id))
-        }
-
-        Pair(hydratedConversations, contactsSorted)
     }
 
     private fun fetchLatestPreview(
@@ -284,7 +399,7 @@ object SanctuaryCore {
 
                     sseClient.newCall(req).execute().use { response ->
                         if (response.isSuccessful) {
-                            backoffMs = 2000L // 建连成功重置退避时间
+                            backoffMs = 2000L
                             val source = response.body?.source()
                             while (isActive && source != null && !source.exhausted()) {
                                 val line = source.readUtf8Line() ?: break
@@ -394,7 +509,8 @@ object SanctuaryCore {
     private fun putUserJson(u: JSONObject) {
         val uid = u.optInt("uid", -1)
         if (uid == -1) return
-        val name = u.optString("name", "用户 $uid")
+        val rawName = u.optString("name", "").trim()
+        val name = if (rawName.isNotEmpty()) rawName else "用户 #$uid"
         val email = u.optString("email", "")
         val avatarUpdatedAt = u.optLong("avatar_updated_at", 0L)
         val isAdmin = u.optBoolean("is_admin", false)
@@ -411,7 +527,19 @@ object SanctuaryCore {
         )
     }
 
-    // 🖼️ 加载用户或群组头像（内存 + 磁盘双层缓存，零闪烁回退文字占位）
+    // 🖼️ 预热有头像的用户，加快首屏与聊天室进入速度
+    fun prewarmAvatars(context: Context, serverUrl: String, token: String) {
+        userMap.values.filter { it.avatarUpdatedAt > 0L }.forEach { u ->
+            val cacheKey = "u_${u.uid}_${u.avatarUpdatedAt}"
+            if (avatarMemoryCache.get(cacheKey) == null) {
+                coreScope.launch {
+                    fetchOrLoadAvatarBitmap(context, serverUrl, token, false, u.uid, cacheKey)
+                }
+            }
+        }
+    }
+
+    // 🖼️ 加载用户或群组头像（内存 + 磁盘缩略图缓存 + In-Flight 请求去重合并）
     fun loadAvatar(
         context: Context,
         scope: CoroutineScope,
@@ -430,7 +558,7 @@ object SanctuaryCore {
             avatarUpdatedAt
         }
 
-        tvFallback.text = fallbackText
+        tvFallback.text = fallbackText.ifBlank { "?" }
         tvFallback.visibility = View.VISIBLE
         ivAvatar.visibility = View.GONE
 
@@ -450,18 +578,54 @@ object SanctuaryCore {
             return
         }
 
-        scope.launch(Dispatchers.IO) {
-            var bitmap: Bitmap? = null
-            val avatarDir = File(context.cacheDir, "avatars").apply { if (!exists()) mkdirs() }
-            val diskFile = File(avatarDir, "$cacheKey.png")
-
-            // 2. 检查磁盘缓存
-            if (diskFile.exists() && diskFile.length() > 0) {
-                bitmap = decodeSampledBitmap(diskFile.readBytes(), 144, 144)
+        scope.launch {
+            val bitmap = fetchOrLoadAvatarBitmap(context, serverUrl, token, isGroup, id, cacheKey)
+            if (bitmap != null) {
+                withContext(Dispatchers.Main) {
+                    if (ivAvatar.tag == cacheKey) {
+                        ivAvatar.setImageBitmap(bitmap)
+                        ivAvatar.visibility = View.VISIBLE
+                        tvFallback.visibility = View.GONE
+                    }
+                }
             }
+        }
+    }
 
-            // 3. 网络拉取
-            if (bitmap == null) {
+    private suspend fun fetchOrLoadAvatarBitmap(
+        context: Context,
+        serverUrl: String,
+        token: String,
+        isGroup: Boolean,
+        id: Int,
+        cacheKey: String
+    ): Bitmap? {
+        avatarMemoryCache.get(cacheKey)?.let { return it }
+
+        // 先尝试本地磁盘缓存（存的已经是缩放后小图，极速读取）
+        val avatarDir = File(context.cacheDir, "avatars").apply { if (!exists()) mkdirs() }
+        val diskFile = File(avatarDir, "$cacheKey.webp")
+        val legacyFile = File(avatarDir, "$cacheKey.png")
+
+        val existingDisk = when {
+            diskFile.exists() && diskFile.length() > 0 -> diskFile
+            legacyFile.exists() && legacyFile.length() > 0 -> legacyFile
+            else -> null
+        }
+
+        if (existingDisk != null) {
+            val cachedBmp = withContext(Dispatchers.IO) {
+                BitmapFactory.decodeFile(existingDisk.absolutePath)
+            }
+            if (cachedBmp != null) {
+                avatarMemoryCache.put(cacheKey, cachedBmp)
+                return cachedBmp
+            }
+        }
+
+        // 请求去重合并：同一个 cacheKey 正在下载时直接共享同一个 Deferred，绝不重复发网络请求！
+        val deferred = inFlightAvatars.getOrPut(cacheKey) {
+            coreScope.async {
                 try {
                     val path = if (isGroup) {
                         "$serverUrl/api/resource/group_avatar?gid=$id"
@@ -477,29 +641,28 @@ object SanctuaryCore {
                         if (res.isSuccessful) {
                             val bytes = res.body?.bytes()
                             if (bytes != null && bytes.isNotEmpty()) {
-                                bitmap = decodeSampledBitmap(bytes, 144, 144)
-                                if (bitmap != null) {
-                                    FileOutputStream(diskFile).use { it.write(bytes) }
+                                val sampled = decodeSampledBitmap(bytes, 144, 144)
+                                if (sampled != null) {
+                                    avatarMemoryCache.put(cacheKey, sampled)
+                                    // 将缩小后的头像存盘（仅几 KB），下次 1ms 秒读
+                                    FileOutputStream(diskFile).use { out ->
+                                        sampled.compress(Bitmap.CompressFormat.PNG, 90, out)
+                                    }
+                                    return@async sampled
                                 }
                             }
                         }
                     }
+                    null
                 } catch (_: Exception) {
-                }
-            }
-
-            val finalBitmap = bitmap
-            if (finalBitmap != null) {
-                avatarMemoryCache.put(cacheKey, finalBitmap)
-                withContext(Dispatchers.Main) {
-                    if (ivAvatar.tag == cacheKey) {
-                        ivAvatar.setImageBitmap(finalBitmap)
-                        ivAvatar.visibility = View.VISIBLE
-                        tvFallback.visibility = View.GONE
-                    }
+                    null
+                } finally {
+                    inFlightAvatars.remove(cacheKey)
                 }
             }
         }
+
+        return deferred.await()
     }
 
     private fun decodeSampledBitmap(bytes: ByteArray, reqWidth: Int, reqHeight: Int): Bitmap? {

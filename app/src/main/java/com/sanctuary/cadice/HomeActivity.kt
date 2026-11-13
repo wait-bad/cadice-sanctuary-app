@@ -31,7 +31,6 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var conversationAdapter: ConversationAdapter
     private lateinit var contactAdapter: ConversationAdapter
 
-    // 用来区分初始历史回放与真正的新到达消息，以及当前正在浏览的会话
     private var lastSyncCompletedAt: Long = 0L
     private var activeIsGroup: Boolean? = null
     private var activeTargetId: Int = -1
@@ -48,7 +47,6 @@ class HomeActivity : AppCompatActivity() {
         isDarkTheme = prefs.getBoolean("dark_theme", true)
 
         if (token.isEmpty() || serverUrl.isEmpty() || myUid == -1) {
-            // 清理可能残缺的登录态，彻底杜绝与 MainActivity 互踢死循环
             prefs.edit().remove("token").remove("user_uid").apply()
             startActivity(Intent(this, MainActivity::class.java))
             finish()
@@ -62,12 +60,12 @@ class HomeActivity : AppCompatActivity() {
 
         val btnRefresh = findViewById<MaterialButton>(R.id.btn_home_refresh)
         btnRefresh.setOnClickListener {
-            loadData()
+            loadData(showSpinner = true)
         }
 
         val btnLogout = findViewById<MaterialButton>(R.id.btn_home_logout)
         btnLogout.setOnClickListener {
-            SanctuaryCore.clearSessionCache()
+            SanctuaryCore.clearSessionCache(this)
             prefs.edit()
                 .remove("token")
                 .remove("user_uid")
@@ -77,7 +75,6 @@ class HomeActivity : AppCompatActivity() {
             finish()
         }
 
-        // 初始化 RecyclerView
         val rvConversations = findViewById<RecyclerView>(R.id.rv_conversations)
         val rvContacts = findViewById<RecyclerView>(R.id.rv_contacts)
 
@@ -108,15 +105,25 @@ class HomeActivity : AppCompatActivity() {
         rvConversations.adapter = conversationAdapter
         rvContacts.adapter = contactAdapter
 
-        // 底部导航栏切换
         setupNavigation()
-
-        // 订阅全局实时 SSE 事件流
         observeRealtimeEvents()
         SanctuaryCore.startSse(serverUrl, token, myUid)
 
-        // 加载数据
-        loadData()
+        // 1. 优先从本地快照 0ms 秒开首屏（瞬间显示上次缓存的会话、联系人与磁盘头像）
+        val cached = SanctuaryCore.loadHomeSnapshot(this)
+        if (cached != null) {
+            conversationList.clear()
+            conversationList.addAll(cached.first)
+            contactList.clear()
+            contactList.addAll(cached.second)
+            updateMyHeaderAvatar()
+            updateContactsHeaderCount()
+            conversationAdapter.notifyDataSetChanged()
+            contactAdapter.notifyDataSetChanged()
+            loadData(showSpinner = false) // 后台无感刷新
+        } else {
+            loadData(showSpinner = true)
+        }
     }
 
     override fun onResume() {
@@ -136,7 +143,6 @@ class HomeActivity : AppCompatActivity() {
         activeIsGroup = item.isGroup
         activeTargetId = item.id
 
-        // 清除当前会话未读数
         val idx = conversationList.indexOfFirst { it.isGroup == item.isGroup && it.id == item.id }
         if (idx != -1 && conversationList[idx].unreadCount > 0) {
             conversationList[idx] = conversationList[idx].copy(unreadCount = 0)
@@ -230,19 +236,28 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateContactsHeaderCount() {
+        val tvContactsHeader = findViewById<TextView>(R.id.tv_contacts_header)
+        val groups = contactList.count { it.isGroup }
+        val users = contactList.count { !it.isGroup }
+        tvContactsHeader.text = "群聊与全员名录 · $groups 个群聊 / $users 位成员"
+    }
+
     private fun observeRealtimeEvents() {
         lifecycleScope.launch {
             SanctuaryCore.userStateEvents.collect {
-                // 在线状态或用户头像时间戳更新，刷新列表与个人头像
                 updateMyHeaderAvatar()
+                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl, token)
+
                 var changed = false
                 for (i in contactList.indices) {
                     val item = contactList[i]
                     if (!item.isGroup) {
                         val online = SanctuaryCore.isUserOnline(item.id)
                         val avTs = SanctuaryCore.getAvatarUpdatedAt(item.id)
-                        if (item.isOnline != online || item.avatarUpdatedAt != avTs) {
-                            contactList[i] = item.copy(isOnline = online, avatarUpdatedAt = avTs)
+                        val name = SanctuaryCore.getDisplayName(item.id)
+                        if (item.isOnline != online || item.avatarUpdatedAt != avTs || item.name != name) {
+                            contactList[i] = item.copy(name = name, isOnline = online, avatarUpdatedAt = avTs)
                             changed = true
                         }
                     }
@@ -255,8 +270,9 @@ class HomeActivity : AppCompatActivity() {
                     if (!item.isGroup) {
                         val online = SanctuaryCore.isUserOnline(item.id)
                         val avTs = SanctuaryCore.getAvatarUpdatedAt(item.id)
-                        if (item.isOnline != online || item.avatarUpdatedAt != avTs) {
-                            conversationList[i] = item.copy(isOnline = online, avatarUpdatedAt = avTs)
+                        val name = SanctuaryCore.getDisplayName(item.id)
+                        if (item.isOnline != online || item.avatarUpdatedAt != avTs || item.name != name) {
+                            conversationList[i] = item.copy(name = name, isOnline = online, avatarUpdatedAt = avTs)
                             convChanged = true
                         }
                     }
@@ -281,7 +297,6 @@ class HomeActivity : AppCompatActivity() {
 
                 if (idx != -1) {
                     val old = conversationList[idx]
-                    // 仅当新消息时间不早于已显示的最后一条时才更新并置顶
                     if (event.createdAt >= old.lastTime) {
                         val updated = old.copy(
                             lastMsg = preview,
@@ -293,19 +308,18 @@ class HomeActivity : AppCompatActivity() {
                         conversationAdapter.notifyDataSetChanged()
                     }
                 } else {
-                    // 收到未在当前列表中的新好友/新群消息，动态追加到顶部
                     val name = if (event.isGroup) "群聊 #${event.targetId}" else SanctuaryCore.getDisplayName(event.targetId)
                     val newItem = ConversationItem(
                         id = event.targetId,
                         isGroup = event.isGroup,
                         name = name,
-                        description = if (event.isGroup) "群聊频道" else "VoceChat 好友",
+                        description = if (event.isGroup) "群聊频道" else "VoceChat 成员",
                         lastMsg = preview,
                         lastTime = event.createdAt,
                         unreadCount = if (isNewRealtime) 1 else 0,
                         avatarUpdatedAt = if (event.isGroup) 0L else SanctuaryCore.getAvatarUpdatedAt(event.targetId),
                         isOnline = if (event.isGroup) false else SanctuaryCore.isUserOnline(event.targetId),
-                        badge = if (event.isGroup) "群聊" else "好友"
+                        badge = if (event.isGroup) "群聊" else "成员"
                     )
                     conversationList.add(0, newItem)
                     conversationAdapter.notifyItemInserted(0)
@@ -333,27 +347,53 @@ class HomeActivity : AppCompatActivity() {
         )
     }
 
-    private fun loadData() {
+    private fun loadData(showSpinner: Boolean) {
         val pbLoading = findViewById<ProgressBar>(R.id.pb_loading)
         val tvEmpty = findViewById<TextView>(R.id.tv_empty_chats)
 
-        pbLoading.visibility = View.VISIBLE
+        if (showSpinner && conversationList.isEmpty()) {
+            pbLoading.visibility = View.VISIBLE
+        }
         tvEmpty.visibility = View.GONE
 
         lifecycleScope.launch {
             try {
-                val (conversations, contacts) = SanctuaryCore.syncAllAndBuildLists(
+                // 阶段一：三路并发拉取基础名录，拿到就立刻渲染列表 & 预热头像，不等 history！
+                val (baseConvs, contacts) = SanctuaryCore.fetchBaseDirectory(
                     serverUrl = serverUrl,
                     token = token,
                     myUid = myUid
                 )
+
+                // 若已有实时推送或旧摘要，先合并保留，避免闪烁回退成“点击发起私聊”
+                val oldMap = conversationList.associateBy { Pair(it.isGroup, it.id) }
+                val mergedBase = baseConvs.map { item ->
+                    val prev = oldMap[Pair(item.isGroup, item.id)]
+                    if (prev != null && prev.lastTime > item.lastTime) {
+                        item.copy(
+                            lastMsg = prev.lastMsg,
+                            lastTime = prev.lastTime,
+                            unreadCount = prev.unreadCount
+                        )
+                    } else {
+                        item
+                    }
+                }.sortedWith(
+                    compareByDescending<ConversationItem> { it.lastTime }
+                        .thenByDescending { it.isGroup }
+                        .thenByDescending { it.badge == "好友" }
+                        .thenBy { it.id }
+                )
+
                 conversationList.clear()
-                conversationList.addAll(conversations)
+                conversationList.addAll(mergedBase)
                 contactList.clear()
                 contactList.addAll(contacts)
 
-                lastSyncCompletedAt = System.currentTimeMillis()
+                pbLoading.visibility = View.GONE
                 updateMyHeaderAvatar()
+                updateContactsHeaderCount()
+                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl, token)
 
                 conversationAdapter.notifyDataSetChanged()
                 contactAdapter.notifyDataSetChanged()
@@ -361,6 +401,24 @@ class HomeActivity : AppCompatActivity() {
                 if (conversationList.isEmpty()) {
                     tvEmpty.visibility = View.VISIBLE
                 }
+
+                // 阶段二：后台静默并发补全每个会话的最新一条消息摘要与时间，并保存本地快照
+                val hydrated = SanctuaryCore.hydrateLatestPreviews(
+                    serverUrl = serverUrl,
+                    token = token,
+                    items = mergedBase
+                )
+                val unreadMap = conversationList.associate { Pair(it.isGroup, it.id) to it.unreadCount }
+                val finalConvs = hydrated.map { item ->
+                    item.copy(unreadCount = unreadMap[Pair(item.isGroup, item.id)] ?: item.unreadCount)
+                }
+
+                conversationList.clear()
+                conversationList.addAll(finalConvs)
+                lastSyncCompletedAt = System.currentTimeMillis()
+                conversationAdapter.notifyDataSetChanged()
+
+                SanctuaryCore.saveHomeSnapshot(this@HomeActivity, finalConvs, contacts)
             } catch (e: Exception) {
                 Toast.makeText(this@HomeActivity, "拉取数据失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
