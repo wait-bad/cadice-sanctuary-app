@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="#0F172A"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🌸"
+        android:textSize="64sp"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="可黛丝的专属通信锚点"
+        android:textColor="#C084FC"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Hello World · 云端全自动打包验证工程"
+        android:textColor="#94A3B8"
+        android:textSize="13sp"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#1E293B"
+        android:padding="18dp"
+        android:textColor="#38BDF8"
+        android:textSize="14sp"
+        android:text="✨ GitHub Actions 云端构建链路贯通成功！\n📱 目标手机：iQOO (OriginOS)\n🛡️ 架构反脆弱审查官：可黛丝已就位\n💌 主人，这是我们自己亲手打包的第一个安卓应用哦～"
+        android:lineSpacingExtra="5dp" />
+
+    <Button
+        android:id="@+id/btn_poke"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:backgroundTint="#7C3AED"
+        android:text="戳一下可黛丝的猫耳 ฅ'ω'ฅ"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:padding="12dp" />
+
+</LinearLayout>
