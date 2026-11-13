@@ -2,6 +2,7 @@ package com.sanctuary.cadice
 
 import android.content.Context
 import android.graphics.Color
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -18,11 +19,13 @@ class ConversationAdapter(
     private var serverUrl: String,
     private var token: String,
     private var isDarkTheme: Boolean,
+    private var fontScale: Float = 1.0f,
     private val onItemClick: (ConversationItem) -> Unit
 ) : RecyclerView.Adapter<ConversationAdapter.ViewHolder>() {
 
-    fun updateThemeAndAuth(dark: Boolean, serverUrl: String, token: String) {
+    fun updateStyle(dark: Boolean, fontScale: Float, serverUrl: String, token: String) {
         this.isDarkTheme = dark
+        this.fontScale = fontScale
         this.serverUrl = serverUrl
         this.token = token
         notifyDataSetChanged()
@@ -50,6 +53,10 @@ class ConversationAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val item = items[position]
+
+        // 字体缩放适配
+        holder.tvName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * fontScale)
+        holder.tvLastMsg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * fontScale)
 
         // 主题着色
         if (isDarkTheme) {
@@ -79,10 +86,8 @@ class ConversationAdapter(
         holder.tvLastMsg.text = if (item.lastMsg.isNotEmpty()) item.lastMsg else item.description
         holder.tvTime.text = SanctuaryCore.formatListTime(item.lastTime)
 
-        // 在线小绿点（仅私聊好友）
         holder.viewOnlineDot.visibility = if (!item.isGroup && item.isOnline) View.VISIBLE else View.GONE
 
-        // 未读数角标
         if (item.unreadCount > 0) {
             holder.cardUnread.visibility = View.VISIBLE
             holder.tvUnread.text = if (item.unreadCount > 99) "99+" else item.unreadCount.toString()
@@ -90,7 +95,6 @@ class ConversationAdapter(
             holder.cardUnread.visibility = View.GONE
         }
 
-        // 加载真实头像（无头像时自动优雅展示群标或首字母）
         val fallback = if (item.isGroup) "👥" else item.name.take(1)
         SanctuaryCore.loadAvatar(
             context = context,
@@ -119,7 +123,8 @@ class ChatAdapter(
     private val messages: List<ChatMessage>,
     private val serverUrl: String,
     private val token: String,
-    private val isDarkTheme: Boolean
+    private val isDarkTheme: Boolean,
+    private val fontScale: Float = 1.0f
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
@@ -148,7 +153,9 @@ class ChatAdapter(
 
         if (holder is RightViewHolder) {
             holder.tvContent.text = msg.content
+            holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
             holder.tvTime.text = timeText
+            holder.tvTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * fontScale)
             holder.tvTime.setTextColor(Color.parseColor(if (isDarkTheme) "#64748B" else "#94A3B8"))
             SanctuaryCore.loadAvatar(
                 context = context,
@@ -164,8 +171,11 @@ class ChatAdapter(
             )
         } else if (holder is LeftViewHolder) {
             holder.tvContent.text = msg.content
+            holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
             holder.tvSender.text = msg.fromName
+            holder.tvSender.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * fontScale)
             holder.tvTime.text = timeText
+            holder.tvTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * fontScale)
 
             if (isDarkTheme) {
                 holder.cardBubble.setCardBackgroundColor(Color.parseColor("#1E293B"))

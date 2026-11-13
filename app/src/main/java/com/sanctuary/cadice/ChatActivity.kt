@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
+import android.util.TypedValue
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -15,9 +16,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -32,6 +31,7 @@ class ChatActivity : AppCompatActivity() {
     private var myUid: Int = -1
     private var myName: String = ""
     private var isDarkTheme: Boolean = true
+    private var fontScale: Float = 1.0f
 
     private var isGroup: Boolean = true
     private var targetId: Int = -1
@@ -46,12 +46,13 @@ class ChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
 
-        prefs = getSharedPreferences("cadice_sanctuary_prefs", Context.MODE_PRIVATE)
-        serverUrl = prefs.getString("server_url", "") ?: ""
-        token = prefs.getString("token", "") ?: ""
-        myUid = prefs.getInt("user_uid", -1)
-        myName = prefs.getString("user_name", "我") ?: "我"
-        isDarkTheme = prefs.getBoolean("dark_theme", true)
+        prefs = getSharedPreferences(SanctuaryCore.PREFS_NAME, Context.MODE_PRIVATE)
+        serverUrl = prefs.getString(SanctuaryCore.KEY_SERVER_URL, "") ?: ""
+        token = prefs.getString(SanctuaryCore.KEY_TOKEN, "") ?: ""
+        myUid = prefs.getInt(SanctuaryCore.KEY_USER_UID, -1)
+        myName = prefs.getString(SanctuaryCore.KEY_USER_NAME, "我") ?: "我"
+        isDarkTheme = prefs.getBoolean(SanctuaryCore.KEY_DARK_THEME, true)
+        fontScale = SanctuaryCore.getFontScale(prefs)
 
         isGroup = intent.getBooleanExtra("is_group", true)
         targetId = intent.getIntExtra("target_id", -1)
@@ -83,12 +84,14 @@ class ChatActivity : AppCompatActivity() {
             scope = lifecycleScope,
             messages = messageList,
             serverUrl = serverUrl,
-            token = token,
-            isDarkTheme = isDarkTheme
+            token = SanctuaryCore.activeToken.ifEmpty { token },
+            isDarkTheme = isDarkTheme,
+            fontScale = fontScale
         )
         rvMessages.adapter = chatAdapter
 
         val etMessage = findViewById<EditText>(R.id.et_message)
+        etMessage.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
         val btnSend = findViewById<MaterialButton>(R.id.btn_send)
 
         btnSend.setOnClickListener {
@@ -98,7 +101,6 @@ class ChatActivity : AppCompatActivity() {
             }
         }
 
-        // 加载历史消息并订阅实时新消息
         loadHistory()
         observeRealtimeMessages()
     }
@@ -189,19 +191,16 @@ class ChatActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val req = Request.Builder()
-                    .url(path)
-                    .header("X-API-Key", token)
-                    .get()
-                    .build()
-
-                val (isSuccess, body) = withContext(Dispatchers.IO) {
-                    SanctuaryCore.httpClient.newCall(req).execute().use { res ->
-                        Pair(res.isSuccessful, res.body?.string().orEmpty())
-                    }
+                // 使用自动续期 + 401 重试执行器，彻底解决免登后进聊天室没历史的问题！
+                val (code, body) = SanctuaryCore.executeAuthorized(this@ChatActivity) { tk ->
+                    Request.Builder()
+                        .url(path)
+                        .header("X-API-Key", tk)
+                        .get()
+                        .build()
                 }
 
-                if (isSuccess && body.startsWith("[")) {
+                if (code in 200..299 && body.startsWith("[")) {
                     val arr = JSONArray(body)
                     messageList.clear()
                     loadedMids.clear()
@@ -239,6 +238,8 @@ class ChatActivity : AppCompatActivity() {
                     if (messageList.isNotEmpty()) {
                         rvMessages.scrollToPosition(messageList.size - 1)
                     }
+                } else if (code !in 200..299) {
+                    Toast.makeText(this@ChatActivity, "拉取历史失败 (HTTP $code)", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Toast.makeText(this@ChatActivity, "获取历史失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
@@ -258,20 +259,16 @@ class ChatActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val mediaType = "text/plain; charset=utf-8".toMediaType()
-                val req = Request.Builder()
-                    .url(sendUrl)
-                    .header("X-API-Key", token)
-                    .post(text.toRequestBody(mediaType))
-                    .build()
-
-                val (isSuccess, code, midStr) = withContext(Dispatchers.IO) {
-                    SanctuaryCore.httpClient.newCall(req).execute().use { res ->
-                        Triple(res.isSuccessful, res.code, res.body?.string()?.trim().orEmpty())
-                    }
+                val (code, midStr) = SanctuaryCore.executeAuthorized(this@ChatActivity) { tk ->
+                    Request.Builder()
+                        .url(sendUrl)
+                        .header("X-API-Key", tk)
+                        .post(text.toRequestBody(mediaType))
+                        .build()
                 }
 
-                if (isSuccess) {
-                    val newMid = midStr.toLongOrNull() ?: System.currentTimeMillis()
+                if (code in 200..299) {
+                    val newMid = midStr.trim().toLongOrNull() ?: System.currentTimeMillis()
                     if (loadedMids.add(newMid)) {
                         messageList.add(
                             ChatMessage(

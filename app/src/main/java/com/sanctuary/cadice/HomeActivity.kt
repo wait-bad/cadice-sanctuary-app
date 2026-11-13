@@ -7,23 +7,29 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.widget.*
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.GravityCompat
 import androidx.core.view.WindowCompat
+import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.launch
 
 class HomeActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
+    private lateinit var drawerLayout: DrawerLayout
 
     private var serverUrl: String = ""
     private var token: String = ""
     private var myUid: Int = -1
     private var myName: String = ""
     private var isDarkTheme: Boolean = true
+    private var fontScale: Float = 1.0f
 
     private val conversationList = mutableListOf<ConversationItem>()
     private val contactList = mutableListOf<ConversationItem>()
@@ -39,40 +45,75 @@ class HomeActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_home)
 
-        prefs = getSharedPreferences("cadice_sanctuary_prefs", Context.MODE_PRIVATE)
-        serverUrl = prefs.getString("server_url", "") ?: ""
-        token = prefs.getString("token", "") ?: ""
-        myUid = prefs.getInt("user_uid", -1)
-        myName = prefs.getString("user_name", "") ?: ""
-        isDarkTheme = prefs.getBoolean("dark_theme", true)
+        prefs = getSharedPreferences(SanctuaryCore.PREFS_NAME, Context.MODE_PRIVATE)
+        serverUrl = prefs.getString(SanctuaryCore.KEY_SERVER_URL, "") ?: ""
+        token = prefs.getString(SanctuaryCore.KEY_TOKEN, "") ?: ""
+        myUid = prefs.getInt(SanctuaryCore.KEY_USER_UID, -1)
+        myName = prefs.getString(SanctuaryCore.KEY_USER_NAME, "") ?: ""
+        isDarkTheme = prefs.getBoolean(SanctuaryCore.KEY_DARK_THEME, true)
+        fontScale = SanctuaryCore.getFontScale(prefs)
 
         if (token.isEmpty() || serverUrl.isEmpty() || myUid == -1) {
-            prefs.edit().remove("token").remove("user_uid").apply()
+            prefs.edit().remove(SanctuaryCore.KEY_TOKEN).remove(SanctuaryCore.KEY_USER_UID).apply()
             startActivity(Intent(this, MainActivity::class.java))
             finish()
             return
         }
 
-        applyTheme()
+        SanctuaryCore.activeToken = token
+        drawerLayout = findViewById(R.id.drawer_layout)
+
+        // 返回键若侧边栏打开，先关闭侧边栏
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
+                    drawerLayout.closeDrawer(GravityCompat.START)
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
+
+        // 顶部头像/标题点击唤出 QQ 侧边栏
+        findViewById<View>(R.id.card_my_avatar).setOnClickListener {
+            drawerLayout.openDrawer(GravityCompat.START)
+        }
+        findViewById<View>(R.id.btn_open_drawer_title).setOnClickListener {
+            drawerLayout.openDrawer(GravityCompat.START)
+        }
 
         val tvSubtitle = findViewById<TextView>(R.id.tv_home_subtitle)
-        tvSubtitle.text = "🟢 $myName · ${serverUrl.removePrefix("https://").removePrefix("http://")}"
+        val cleanHost = serverUrl.removePrefix("https://").removePrefix("http://")
+        tvSubtitle.text = "🟢 $myName · $cleanHost"
 
-        val btnRefresh = findViewById<MaterialButton>(R.id.btn_home_refresh)
-        btnRefresh.setOnClickListener {
+        // 侧边栏个人名片信息
+        findViewById<TextView>(R.id.tv_drawer_name).text = myName
+        findViewById<TextView>(R.id.tv_drawer_server).text = "🌐 $cleanHost (UID: $myUid)"
+
+        // 侧边栏日夜间全局主题切换
+        findViewById<View>(R.id.btn_drawer_theme).setOnClickListener {
+            isDarkTheme = !isDarkTheme
+            prefs.edit().putBoolean(SanctuaryCore.KEY_DARK_THEME, isDarkTheme).apply()
+            applyTheme()
+            conversationAdapter.updateStyle(isDarkTheme, fontScale, serverUrl, SanctuaryCore.activeToken.ifEmpty { token })
+            contactAdapter.updateStyle(isDarkTheme, fontScale, serverUrl, SanctuaryCore.activeToken.ifEmpty { token })
+        }
+
+        // 侧边栏全屏设置入口
+        findViewById<View>(R.id.btn_drawer_settings).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
+        // 顶部刷新按钮
+        findViewById<MaterialButton>(R.id.btn_home_refresh).setOnClickListener {
             loadData(showSpinner = true)
         }
 
-        val btnLogout = findViewById<MaterialButton>(R.id.btn_home_logout)
-        btnLogout.setOnClickListener {
-            SanctuaryCore.clearSessionCache(this)
-            prefs.edit()
-                .remove("token")
-                .remove("user_uid")
-                .remove("user_name")
-                .apply()
-            startActivity(Intent(this, MainActivity::class.java))
-            finish()
+        // 侧边栏退出账号
+        findViewById<MaterialButton>(R.id.btn_home_logout).setOnClickListener {
+            logoutToLogin("已退出登录")
         }
 
         val rvConversations = findViewById<RecyclerView>(R.id.rv_conversations)
@@ -87,7 +128,8 @@ class HomeActivity : AppCompatActivity() {
             items = conversationList,
             serverUrl = serverUrl,
             token = token,
-            isDarkTheme = isDarkTheme
+            isDarkTheme = isDarkTheme,
+            fontScale = fontScale
         ) { item ->
             openChat(item)
         }
@@ -97,7 +139,8 @@ class HomeActivity : AppCompatActivity() {
             items = contactList,
             serverUrl = serverUrl,
             token = token,
-            isDarkTheme = isDarkTheme
+            isDarkTheme = isDarkTheme,
+            fontScale = fontScale
         ) { item ->
             openChat(item)
         }
@@ -105,22 +148,25 @@ class HomeActivity : AppCompatActivity() {
         rvConversations.adapter = conversationAdapter
         rvContacts.adapter = contactAdapter
 
+        applyTheme()
         setupNavigation()
         observeRealtimeEvents()
-        SanctuaryCore.startSse(serverUrl, token, myUid)
 
-        // 1. 优先从本地快照 0ms 秒开首屏（瞬间显示上次缓存的会话、联系人与磁盘头像）
+        // 启动自愈续期 SSE
+        SanctuaryCore.startSse(this, serverUrl, myUid)
+
+        // 本地快照 0ms 秒开首屏，再后台拉取最新数据
         val cached = SanctuaryCore.loadHomeSnapshot(this)
         if (cached != null) {
             conversationList.clear()
             conversationList.addAll(cached.first)
             contactList.clear()
             contactList.addAll(cached.second)
-            updateMyHeaderAvatar()
+            updateMyAvatars()
             updateContactsHeaderCount()
             conversationAdapter.notifyDataSetChanged()
             contactAdapter.notifyDataSetChanged()
-            loadData(showSpinner = false) // 后台无感刷新
+            loadData(showSpinner = false)
         } else {
             loadData(showSpinner = true)
         }
@@ -130,6 +176,19 @@ class HomeActivity : AppCompatActivity() {
         super.onResume()
         activeIsGroup = null
         activeTargetId = -1
+        // 从设置页返回时同步最新字体大小、主题和头像
+        val newDark = prefs.getBoolean(SanctuaryCore.KEY_DARK_THEME, true)
+        val newFontScale = SanctuaryCore.getFontScale(prefs)
+        val latestToken = prefs.getString(SanctuaryCore.KEY_TOKEN, token) ?: token
+        token = latestToken
+        if (newDark != isDarkTheme || newFontScale != fontScale) {
+            isDarkTheme = newDark
+            fontScale = newFontScale
+            applyTheme()
+            conversationAdapter.updateStyle(isDarkTheme, fontScale, serverUrl, latestToken)
+            contactAdapter.updateStyle(isDarkTheme, fontScale, serverUrl, latestToken)
+        }
+        updateMyAvatars()
     }
 
     override fun onDestroy() {
@@ -137,6 +196,20 @@ class HomeActivity : AppCompatActivity() {
         if (isFinishing) {
             SanctuaryCore.stopSse()
         }
+    }
+
+    private fun logoutToLogin(tip: String) {
+        SanctuaryCore.clearSessionCache(this)
+        prefs.edit()
+            .remove(SanctuaryCore.KEY_TOKEN)
+            .remove(SanctuaryCore.KEY_REFRESH_TOKEN)
+            .remove(SanctuaryCore.KEY_TOKEN_OBTAINED_AT)
+            .remove(SanctuaryCore.KEY_USER_UID)
+            .remove(SanctuaryCore.KEY_USER_NAME)
+            .apply()
+        Toast.makeText(this, tip, Toast.LENGTH_SHORT).show()
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
     }
 
     private fun openChat(item: ConversationItem) {
@@ -163,11 +236,29 @@ class HomeActivity : AppCompatActivity() {
         val bottomBar = findViewById<LinearLayout>(R.id.home_bottom_bar)
         val tvTitle = findViewById<TextView>(R.id.tv_home_title)
         val tvContactsHeader = findViewById<TextView>(R.id.tv_contacts_header)
+        val cardMyAvatar = findViewById<MaterialCardView>(R.id.card_my_avatar)
+
+        // 侧边栏元素
+        val drawerContainer = findViewById<LinearLayout>(R.id.drawer_container)
+        val drawerHeader = findViewById<LinearLayout>(R.id.drawer_header)
+        val tvDrawerName = findViewById<TextView>(R.id.tv_drawer_name)
+        val tvDrawerServer = findViewById<TextView>(R.id.tv_drawer_server)
+        val btnDrawerTheme = findViewById<MaterialCardView>(R.id.btn_drawer_theme)
+        val tvThemeIcon = findViewById<TextView>(R.id.tv_drawer_theme_icon)
+        val tvThemeLabel = findViewById<TextView>(R.id.tv_drawer_theme_label)
+        val tvThemeHint = findViewById<TextView>(R.id.tv_drawer_theme_hint)
+        val btnDrawerSettings = findViewById<MaterialCardView>(R.id.btn_drawer_settings)
+        val tvSettingsLabel = findViewById<TextView>(R.id.tv_drawer_settings_label)
+        val tvSettingsHint = findViewById<TextView>(R.id.tv_drawer_settings_hint)
 
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         if (isDarkTheme) {
             val bg = Color.parseColor("#0F172A")
             val bar = Color.parseColor("#1E293B")
+            val stroke = Color.parseColor("#334155")
+            val textMain = Color.parseColor("#F8FAFC")
+            val textSub = Color.parseColor("#94A3B8")
+
             window.statusBarColor = bar
             window.navigationBarColor = bar
             insetsController.isAppearanceLightStatusBars = false
@@ -176,11 +267,34 @@ class HomeActivity : AppCompatActivity() {
             homeRoot.setBackgroundColor(bg)
             topBar.setBackgroundColor(bar)
             bottomBar.setBackgroundColor(bar)
-            tvTitle.setTextColor(Color.parseColor("#F8FAFC"))
+            tvTitle.setTextColor(textMain)
             tvContactsHeader.setTextColor(Color.parseColor("#64748B"))
+            cardMyAvatar.strokeColor = stroke
+
+            drawerContainer.setBackgroundColor(bar)
+            drawerHeader.setBackgroundColor(bg)
+            tvDrawerName.setTextColor(textMain)
+            tvDrawerServer.setTextColor(textSub)
+
+            btnDrawerTheme.setCardBackgroundColor(bg)
+            btnDrawerTheme.strokeColor = stroke
+            tvThemeIcon.text = "🌙"
+            tvThemeLabel.text = "夜间模式"
+            tvThemeLabel.setTextColor(textMain)
+            tvThemeHint.text = "点击切换日间"
+            tvThemeHint.setTextColor(textSub)
+
+            btnDrawerSettings.setCardBackgroundColor(bg)
+            btnDrawerSettings.strokeColor = stroke
+            tvSettingsLabel.setTextColor(textMain)
+            tvSettingsHint.setTextColor(textSub)
         } else {
             val bg = Color.parseColor("#F8FAFC")
             val bar = Color.parseColor("#FFFFFF")
+            val stroke = Color.parseColor("#E2E8F0")
+            val textMain = Color.parseColor("#0F172A")
+            val textSub = Color.parseColor("#64748B")
+
             window.statusBarColor = bar
             window.navigationBarColor = bar
             insetsController.isAppearanceLightStatusBars = true
@@ -189,8 +303,27 @@ class HomeActivity : AppCompatActivity() {
             homeRoot.setBackgroundColor(bg)
             topBar.setBackgroundColor(bar)
             bottomBar.setBackgroundColor(bar)
-            tvTitle.setTextColor(Color.parseColor("#0F172A"))
-            tvContactsHeader.setTextColor(Color.parseColor("#64748B"))
+            tvTitle.setTextColor(textMain)
+            tvContactsHeader.setTextColor(textSub)
+            cardMyAvatar.strokeColor = stroke
+
+            drawerContainer.setBackgroundColor(bar)
+            drawerHeader.setBackgroundColor(bg)
+            tvDrawerName.setTextColor(textMain)
+            tvDrawerServer.setTextColor(textSub)
+
+            btnDrawerTheme.setCardBackgroundColor(bg)
+            btnDrawerTheme.strokeColor = stroke
+            tvThemeIcon.text = "☀️"
+            tvThemeLabel.text = "日间模式"
+            tvThemeLabel.setTextColor(textMain)
+            tvThemeHint.text = "点击切换夜间"
+            tvThemeHint.setTextColor(textSub)
+
+            btnDrawerSettings.setCardBackgroundColor(bg)
+            btnDrawerSettings.strokeColor = stroke
+            tvSettingsLabel.setTextColor(textMain)
+            tvSettingsHint.setTextColor(textSub)
         }
     }
 
@@ -245,9 +378,15 @@ class HomeActivity : AppCompatActivity() {
 
     private fun observeRealtimeEvents() {
         lifecycleScope.launch {
+            SanctuaryCore.authExpiredEvents.collect {
+                logoutToLogin("登录凭证已失效，请重新登录")
+            }
+        }
+
+        lifecycleScope.launch {
             SanctuaryCore.userStateEvents.collect {
-                updateMyHeaderAvatar()
-                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl, token)
+                updateMyAvatars()
+                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl)
 
                 var changed = false
                 for (i in contactList.indices) {
@@ -329,21 +468,34 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateMyHeaderAvatar() {
-        val ivMyAvatar = findViewById<ImageView>(R.id.iv_my_avatar)
-        val tvMyAvatar = findViewById<TextView>(R.id.tv_my_avatar)
+    private fun updateMyAvatars() {
         val myAvatarTs = SanctuaryCore.getAvatarUpdatedAt(myUid)
+        val fallback = myName.take(1).ifBlank { "我" }
+        val activeTk = SanctuaryCore.activeToken.ifEmpty { token }
+
         SanctuaryCore.loadAvatar(
             context = this,
             scope = lifecycleScope,
             serverUrl = serverUrl,
-            token = token,
+            token = activeTk,
             isGroup = false,
             id = myUid,
             avatarUpdatedAt = myAvatarTs,
-            fallbackText = myName.take(1).ifBlank { "我" },
-            ivAvatar = ivMyAvatar,
-            tvFallback = tvMyAvatar
+            fallbackText = fallback,
+            ivAvatar = findViewById(R.id.iv_my_avatar),
+            tvFallback = findViewById(R.id.tv_my_avatar)
+        )
+        SanctuaryCore.loadAvatar(
+            context = this,
+            scope = lifecycleScope,
+            serverUrl = serverUrl,
+            token = activeTk,
+            isGroup = false,
+            id = myUid,
+            avatarUpdatedAt = myAvatarTs,
+            fallbackText = fallback,
+            ivAvatar = findViewById(R.id.iv_drawer_avatar),
+            tvFallback = findViewById(R.id.tv_drawer_avatar)
         )
     }
 
@@ -358,14 +510,13 @@ class HomeActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                // 阶段一：三路并发拉取基础名录，拿到就立刻渲染列表 & 预热头像，不等 history！
+                // 阶段一：自动续期 Token 并并发拉取基础名录
                 val (baseConvs, contacts) = SanctuaryCore.fetchBaseDirectory(
+                    context = this@HomeActivity,
                     serverUrl = serverUrl,
-                    token = token,
                     myUid = myUid
                 )
 
-                // 若已有实时推送或旧摘要，先合并保留，避免闪烁回退成“点击发起私聊”
                 val oldMap = conversationList.associateBy { Pair(it.isGroup, it.id) }
                 val mergedBase = baseConvs.map { item ->
                     val prev = oldMap[Pair(item.isGroup, item.id)]
@@ -385,15 +536,17 @@ class HomeActivity : AppCompatActivity() {
                         .thenBy { it.id }
                 )
 
-                conversationList.clear()
-                conversationList.addAll(mergedBase)
-                contactList.clear()
-                contactList.addAll(contacts)
+                if (mergedBase.isNotEmpty()) {
+                    conversationList.clear()
+                    conversationList.addAll(mergedBase)
+                    contactList.clear()
+                    contactList.addAll(contacts)
+                }
 
                 pbLoading.visibility = View.GONE
-                updateMyHeaderAvatar()
+                updateMyAvatars()
                 updateContactsHeaderCount()
-                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl, token)
+                SanctuaryCore.prewarmAvatars(this@HomeActivity, serverUrl)
 
                 conversationAdapter.notifyDataSetChanged()
                 contactAdapter.notifyDataSetChanged()
@@ -402,11 +555,11 @@ class HomeActivity : AppCompatActivity() {
                     tvEmpty.visibility = View.VISIBLE
                 }
 
-                // 阶段二：后台静默并发补全每个会话的最新一条消息摘要与时间，并保存本地快照
+                // 阶段二：受限流控制的并发摘要补全（最多 3 并发，绝不把隧道挤爆！）
                 val hydrated = SanctuaryCore.hydrateLatestPreviews(
+                    context = this@HomeActivity,
                     serverUrl = serverUrl,
-                    token = token,
-                    items = mergedBase
+                    items = conversationList.toList()
                 )
                 val unreadMap = conversationList.associate { Pair(it.isGroup, it.id) to it.unreadCount }
                 val finalConvs = hydrated.map { item ->
@@ -420,7 +573,7 @@ class HomeActivity : AppCompatActivity() {
 
                 SanctuaryCore.saveHomeSnapshot(this@HomeActivity, finalConvs, contacts)
             } catch (e: Exception) {
-                Toast.makeText(this@HomeActivity, "拉取数据失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@HomeActivity, "刷新失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
             } finally {
                 pbLoading.visibility = View.GONE
             }

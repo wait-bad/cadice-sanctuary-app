@@ -153,28 +153,35 @@ class MainActivity : AppCompatActivity() {
                         .post(payload.toString().toRequestBody(mediaType))
                         .build()
 
-                    val response = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-                    val body = response.body?.string().orEmpty()
-                    val code = response.code
-                    val isSuccessful = response.isSuccessful
-                    response.close()
+                    val (isSuccessful, code, body) = withContext(Dispatchers.IO) {
+                        client.newCall(req).execute().use { res ->
+                            Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
+                        }
+                    }
 
                     if (isSuccessful) {
                         val json = JSONObject(body)
                         val token = json.getString("token")
+                        val refreshToken = json.optString("refresh_token", "")
+                        val expiredIn = json.optLong("expired_in", 300L)
                         val userObj = json.getJSONObject("user")
                         val uid = userObj.getInt("uid")
                         val name = userObj.getString("name")
                         val isAdmin = userObj.optBoolean("is_admin", false)
 
-                        // 永久安全保存凭证（包含当前服务器地址，杜绝跳转校验不一致）
+                        // 永久安全保存凭证（包含 refresh_token 与服务器地址）
                         prefs.edit()
                             .putString(KEY_SERVER_URL, serverUrl)
                             .putString(KEY_TOKEN, token)
+                            .putString(SanctuaryCore.KEY_REFRESH_TOKEN, refreshToken)
+                            .putLong(SanctuaryCore.KEY_TOKEN_OBTAINED_AT, System.currentTimeMillis())
+                            .putLong(SanctuaryCore.KEY_TOKEN_EXPIRED_IN, expiredIn)
                             .putInt(KEY_USER_UID, uid)
                             .putString(KEY_USER_NAME, name)
                             .putBoolean(KEY_IS_ADMIN, isAdmin)
                             .apply()
+                        SanctuaryCore.activeToken = token
+
                         Toast.makeText(this@MainActivity, "登录成功，欢迎 $name！🌸", Toast.LENGTH_SHORT).show()
                         goToHome()
                     } else {

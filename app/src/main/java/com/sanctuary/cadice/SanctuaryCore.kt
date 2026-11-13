@@ -1,6 +1,7 @@
 package com.sanctuary.cadice
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
@@ -10,10 +11,18 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import okhttp3.Dispatcher
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -23,24 +32,44 @@ import java.util.concurrent.TimeUnit
 
 object SanctuaryCore {
 
+    const val PREFS_NAME = "cadice_sanctuary_prefs"
+    const val KEY_SERVER_URL = "server_url"
+    const val KEY_TOKEN = "token"
+    const val KEY_REFRESH_TOKEN = "refresh_token"
+    const val KEY_TOKEN_OBTAINED_AT = "token_obtained_at"
+    const val KEY_TOKEN_EXPIRED_IN = "token_expired_in"
+    const val KEY_USER_NAME = "user_name"
+    const val KEY_USER_UID = "user_uid"
+    const val KEY_IS_ADMIN = "is_admin"
+    const val KEY_DARK_THEME = "dark_theme"
+    const val KEY_FONT_SCALE = "font_scale"
+
+    // 限制单主机最大并发连接数为 4，防止手机打开十几个请求把 Cloudflare 隧道挤爆超时
+    private val sharedDispatcher = Dispatcher().apply {
+        maxRequests = 16
+        maxRequestsPerHost = 4
+    }
+
     val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .dispatcher(sharedDispatcher)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
-                .header("User-Agent", "VioletIM/1.4 (Android; Mobile)")
+                .header("User-Agent", "VioletIM/1.5 (Android; Mobile)")
                 .build()
             chain.proceed(req)
         }
         .build()
 
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
-                .header("User-Agent", "VioletIM/1.4 (Android; Mobile)")
+                .header("User-Agent", "VioletIM/1.5 (Android; Mobile)")
                 .build()
             chain.proceed(req)
         }
@@ -51,10 +80,16 @@ object SanctuaryCore {
 
     // 内存头像缓存 (最多存 100 张缩放后头像)
     private val avatarMemoryCache = LruCache<String, Bitmap>(100)
-
-    // 进行中的头像下载任务去重合并表 (In-Flight Deduplication)，防止同头像并发重复拉取堵死隧道
     private val inFlightAvatars = ConcurrentHashMap<String, Deferred<Bitmap?>>()
     private val coreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // 保护 Token 自动续期的互斥锁，防止并发重复 renew
+    private val renewMutex = Mutex()
+    private val previewSemaphore = Semaphore(3)
+    private val avatarSemaphore = Semaphore(2)
+
+    @Volatile
+    var activeToken: String = ""
 
     // 全局实时事件总线
     private val _incomingMessages = MutableSharedFlow<IncomingChatEvent>(extraBufferCapacity = 64)
@@ -62,6 +97,9 @@ object SanctuaryCore {
 
     private val _userStateEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     val userStateEvents = _userStateEvents.asSharedFlow()
+
+    private val _authExpiredEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val authExpiredEvents = _authExpiredEvents.asSharedFlow()
 
     private var sseJob: Job? = null
     private val sseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -78,13 +116,116 @@ object SanctuaryCore {
         return onlineMap[uid] == true || userMap[uid]?.isOnline == true
     }
 
+    fun getFontScale(prefs: SharedPreferences): Float {
+        return prefs.getFloat(KEY_FONT_SCALE, 1.0f).coerceIn(0.85f, 1.35f)
+    }
+
     fun clearSessionCache(context: Context? = null) {
         stopSse()
+        activeToken = ""
         userMap.clear()
         onlineMap.clear()
         inFlightAvatars.clear()
         context?.let {
             File(it.cacheDir, "snapshot_home.json").delete()
+        }
+    }
+
+    // 🔐 核心保活：检查并自动刷新 VoceChat 5分钟短期 AccessToken！
+    suspend fun ensureValidToken(context: Context, forceRenew: Boolean = false): String? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: ""
+        val currentToken = prefs.getString(KEY_TOKEN, "") ?: ""
+        val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, "") ?: ""
+        val obtainedAt = prefs.getLong(KEY_TOKEN_OBTAINED_AT, 0L)
+        val expiredInSec = prefs.getLong(KEY_TOKEN_EXPIRED_IN, 300L)
+
+        if (currentToken.isEmpty() || serverUrl.isEmpty()) return null
+        activeToken = currentToken
+
+        val now = System.currentTimeMillis()
+        // 若距离过期不足 60 秒（或强制刷新），则调用 /api/token/renew 续期
+        val needsRenew = forceRenew || obtainedAt == 0L || (now - obtainedAt) >= ((expiredInSec - 60).coerceAtLeast(30) * 1000L)
+        if (!needsRenew) {
+            return currentToken
+        }
+
+        if (refreshToken.isEmpty()) {
+            // 老版本升级上来还没有保存 refresh_token：强制刷新时触发温和重登提醒，否则先试着用旧 token
+            if (forceRenew) {
+                _authExpiredEvents.tryEmit(Unit)
+                return null
+            }
+            return currentToken
+        }
+
+        return renewMutex.withLock {
+            // 双重检查，避免刚被另一个协程续期过
+            val latestToken = prefs.getString(KEY_TOKEN, "") ?: ""
+            val latestObtained = prefs.getLong(KEY_TOKEN_OBTAINED_AT, 0L)
+            val latestExp = prefs.getLong(KEY_TOKEN_EXPIRED_IN, 300L)
+            if (!forceRenew && latestToken.isNotEmpty() && latestObtained > 0L &&
+                (System.currentTimeMillis() - latestObtained) < ((latestExp - 60).coerceAtLeast(30) * 1000L)
+            ) {
+                activeToken = latestToken
+                return@withLock latestToken
+            }
+
+            withContext(Dispatchers.IO) {
+                try {
+                    val payload = JSONObject().apply {
+                        put("token", prefs.getString(KEY_TOKEN, "") ?: "")
+                        put("refresh_token", prefs.getString(KEY_REFRESH_TOKEN, "") ?: "")
+                    }
+                    val req = Request.Builder()
+                        .url("$serverUrl/api/token/renew")
+                        .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build()
+                    httpClient.newCall(req).execute().use { res ->
+                        val body = res.body?.string().orEmpty()
+                        if (res.isSuccessful && body.startsWith("{")) {
+                            val json = JSONObject(body)
+                            val newToken = json.getString("token")
+                            val newRefresh = json.optString("refresh_token", refreshToken)
+                            val newExpiredIn = json.optLong("expired_in", 300L)
+                            prefs.edit()
+                                .putString(KEY_TOKEN, newToken)
+                                .putString(KEY_REFRESH_TOKEN, newRefresh)
+                                .putLong(KEY_TOKEN_OBTAINED_AT, System.currentTimeMillis())
+                                .putLong(KEY_TOKEN_EXPIRED_IN, newExpiredIn)
+                                .apply()
+                            activeToken = newToken
+                            return@withContext newToken
+                        } else if (res.code == 401 || res.code == 403) {
+                            _authExpiredEvents.tryEmit(Unit)
+                            return@withContext null
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+                // 网络抖动没续上时，若非强制刷新，先返回现有 token；强制刷新失败则交由调用方处理
+                if (forceRenew) null else (prefs.getString(KEY_TOKEN, "") ?: currentToken)
+            }
+        }
+    }
+
+    // 🛡️ 带自动 401 续期重试的通用请求执行器
+    suspend fun executeAuthorized(context: Context, requestBuilder: (token: String) -> Request): Pair<Int, String> {
+        val token1 = ensureValidToken(context, forceRenew = false) ?: return Pair(401, "")
+        val firstAttempt = withContext(Dispatchers.IO) {
+            httpClient.newCall(requestBuilder(token1)).execute().use { res ->
+                Pair(res.code, res.body?.string().orEmpty())
+            }
+        }
+        if (firstAttempt.first != 401) {
+            return firstAttempt
+        }
+        // 遇到 401 立即强制 renew 后重试一次
+        val token2 = ensureValidToken(context, forceRenew = true) ?: return Pair(401, "")
+        return withContext(Dispatchers.IO) {
+            httpClient.newCall(requestBuilder(token2)).execute().use { res ->
+                Pair(res.code, res.body?.string().orEmpty())
+            }
         }
     }
 
@@ -179,60 +320,65 @@ object SanctuaryCore {
         return list
     }
 
-    // ⚡ 阶段一：三路并发拉取全员用户表、群组、好友联系人（不等历史消息，立刻构建完整名录！）
+    // ⚡ 阶段一：并发拉取用户表、群组、好友联系人（自动续期 + 错峰防超时）
     suspend fun fetchBaseDirectory(
+        context: Context,
         serverUrl: String,
-        token: String,
         myUid: Int
     ): Pair<List<ConversationItem>, List<ConversationItem>> = withContext(Dispatchers.IO) {
+        // 先保证拿到可用有效 Token，避免三路同时撞 401
+        ensureValidToken(context, forceRenew = false)
+
         coroutineScope {
             val usersJob = async {
                 try {
-                    val req = Request.Builder()
-                        .url("$serverUrl/api/user")
-                        .header("X-API-Key", token)
-                        .get()
-                        .build()
-                    httpClient.newCall(req).execute().use { res ->
-                        val body = res.body?.string().orEmpty()
-                        if (res.isSuccessful && body.startsWith("[")) {
-                            parseUsersArray(JSONArray(body))
-                        }
+                    val (code, body) = executeAuthorized(context) { tk ->
+                        Request.Builder()
+                            .url("$serverUrl/api/user")
+                            .header("X-API-Key", tk)
+                            .get()
+                            .build()
+                    }
+                    if (code in 200..299 && body.startsWith("[")) {
+                        parseUsersArray(JSONArray(body))
+                        true
+                    } else {
+                        false
                     }
                 } catch (_: Exception) {
+                    false
                 }
             }
 
             val groupsJob = async {
                 val list = mutableListOf<ConversationItem>()
                 try {
-                    val req = Request.Builder()
-                        .url("$serverUrl/api/group")
-                        .header("X-API-Key", token)
-                        .get()
-                        .build()
-                    httpClient.newCall(req).execute().use { res ->
-                        val body = res.body?.string().orEmpty()
-                        if (res.isSuccessful && body.startsWith("[")) {
-                            val groups = JSONArray(body)
-                            for (i in 0 until groups.length()) {
-                                val g = groups.getJSONObject(i)
-                                val gid = g.getInt("gid")
-                                val name = g.optString("name", "群聊 #$gid").ifBlank { "群聊 #$gid" }
-                                val desc = g.optString("description", "群聊频道").ifBlank { "群聊频道" }
-                                val avatarUpdatedAt = g.optLong("avatar_updated_at", 0L)
-                                list.add(
-                                    ConversationItem(
-                                        id = gid,
-                                        isGroup = true,
-                                        name = name,
-                                        description = desc,
-                                        lastMsg = desc,
-                                        avatarUpdatedAt = avatarUpdatedAt,
-                                        badge = "群聊"
-                                    )
+                    val (code, body) = executeAuthorized(context) { tk ->
+                        Request.Builder()
+                            .url("$serverUrl/api/group")
+                            .header("X-API-Key", tk)
+                            .get()
+                            .build()
+                    }
+                    if (code in 200..299 && body.startsWith("[")) {
+                        val groups = JSONArray(body)
+                        for (i in 0 until groups.length()) {
+                            val g = groups.getJSONObject(i)
+                            val gid = g.getInt("gid")
+                            val name = g.optString("name", "群聊 #$gid").ifBlank { "群聊 #$gid" }
+                            val desc = g.optString("description", "群聊频道").ifBlank { "群聊频道" }
+                            val avatarUpdatedAt = g.optLong("avatar_updated_at", 0L)
+                            list.add(
+                                ConversationItem(
+                                    id = gid,
+                                    isGroup = true,
+                                    name = name,
+                                    description = desc,
+                                    lastMsg = desc,
+                                    avatarUpdatedAt = avatarUpdatedAt,
+                                    badge = "群聊"
                                 )
-                            }
+                            )
                         }
                     }
                 } catch (_: Exception) {
@@ -243,22 +389,21 @@ object SanctuaryCore {
             val contactsJob = async {
                 val friendUids = HashSet<Int>()
                 try {
-                    val req = Request.Builder()
-                        .url("$serverUrl/api/user/contacts")
-                        .header("X-API-Key", token)
-                        .get()
-                        .build()
-                    httpClient.newCall(req).execute().use { res ->
-                        val body = res.body?.string().orEmpty()
-                        if (res.isSuccessful && body.startsWith("[")) {
-                            val contacts = JSONArray(body)
-                            for (i in 0 until contacts.length()) {
-                                val c = contacts.getJSONObject(i)
-                                val targetUid = c.optInt("target_uid", -1)
-                                if (targetUid == -1 || targetUid == myUid) continue
-                                friendUids.add(targetUid)
-                                c.optJSONObject("target_info")?.let { putUserJson(it) }
-                            }
+                    val (code, body) = executeAuthorized(context) { tk ->
+                        Request.Builder()
+                            .url("$serverUrl/api/user/contacts")
+                            .header("X-API-Key", tk)
+                            .get()
+                            .build()
+                    }
+                    if (code in 200..299 && body.startsWith("[")) {
+                        val contacts = JSONArray(body)
+                        for (i in 0 until contacts.length()) {
+                            val c = contacts.getJSONObject(i)
+                            val targetUid = c.optInt("target_uid", -1)
+                            if (targetUid == -1 || targetUid == myUid) continue
+                            friendUids.add(targetUid)
+                            c.optJSONObject("target_info")?.let { putUserJson(it) }
                         }
                     }
                 } catch (_: Exception) {
@@ -270,11 +415,9 @@ object SanctuaryCore {
             val groupItems = groupsJob.await()
             val friendUids = contactsJob.await()
 
-            // 构建完整联系人名录：群聊 + 好友 + 服务器全部其他成员（绝不漏掉任何一个账户！）
             val memberItems = mutableListOf<ConversationItem>()
             val addedUids = HashSet<Int>()
 
-            // 1) 优先放好友
             friendUids.sorted().forEach { uid ->
                 addedUids.add(uid)
                 val u = userMap[uid]
@@ -293,7 +436,6 @@ object SanctuaryCore {
                 )
             }
 
-            // 2) 补齐服务器其余所有非 Bot 成员（即使还没加好友也能看到并直接开聊！）
             userMap.values
                 .filter { it.uid != myUid && !it.isBot && !addedUids.contains(it.uid) }
                 .sortedBy { it.uid }
@@ -320,16 +462,18 @@ object SanctuaryCore {
         }
     }
 
-    // ⚡ 阶段二：后台并发补全每个会话的最新一条消息摘要，不阻塞首屏显示
+    // ⚡ 阶段二：限流并发（最多同时 3 路）补全会话最后一条消息摘要，彻底避免把隧道挤超时！
     suspend fun hydrateLatestPreviews(
+        context: Context,
         serverUrl: String,
-        token: String,
         items: List<ConversationItem>
     ): List<ConversationItem> = withContext(Dispatchers.IO) {
         coroutineScope {
             items.map { item ->
                 async {
-                    fetchLatestPreview(serverUrl, token, item)
+                    previewSemaphore.withPermit {
+                        fetchLatestPreview(context, serverUrl, item)
+                    }
                 }
             }.awaitAll()
         }.sortedWith(
@@ -340,9 +484,9 @@ object SanctuaryCore {
         )
     }
 
-    private fun fetchLatestPreview(
+    private suspend fun fetchLatestPreview(
+        context: Context,
         serverUrl: String,
-        token: String,
         item: ConversationItem
     ): ConversationItem {
         return try {
@@ -351,31 +495,30 @@ object SanctuaryCore {
             } else {
                 "$serverUrl/api/user/${item.id}/history?limit=1"
             }
-            val req = Request.Builder()
-                .url(url)
-                .header("X-API-Key", token)
-                .get()
-                .build()
-            httpClient.newCall(req).execute().use { res ->
-                val body = res.body?.string().orEmpty()
-                if (res.isSuccessful && body.startsWith("[")) {
-                    val arr = JSONArray(body)
-                    if (arr.length() > 0) {
-                        val lastObj = arr.getJSONObject(arr.length() - 1)
-                        val fromUid = lastObj.optInt("from_uid", -1)
-                        val createdAt = normalizeTimestampMs(lastObj.optLong("created_at", 0L))
-                        val detail = lastObj.optJSONObject("detail")
-                        val previewText = parseMessagePreview(detail)
-                        val formatted = if (item.isGroup && fromUid != -1) {
-                            "${getDisplayName(fromUid)}: $previewText"
-                        } else {
-                            previewText
-                        }
-                        return item.copy(
-                            lastMsg = formatted,
-                            lastTime = createdAt
-                        )
+            val (code, body) = executeAuthorized(context) { tk ->
+                Request.Builder()
+                    .url(url)
+                    .header("X-API-Key", tk)
+                    .get()
+                    .build()
+            }
+            if (code in 200..299 && body.startsWith("[")) {
+                val arr = JSONArray(body)
+                if (arr.length() > 0) {
+                    val lastObj = arr.getJSONObject(arr.length() - 1)
+                    val fromUid = lastObj.optInt("from_uid", -1)
+                    val createdAt = normalizeTimestampMs(lastObj.optLong("created_at", 0L))
+                    val detail = lastObj.optJSONObject("detail")
+                    val previewText = parseMessagePreview(detail)
+                    val formatted = if (item.isGroup && fromUid != -1) {
+                        "${getDisplayName(fromUid)}: $previewText"
+                    } else {
+                        previewText
                     }
+                    return item.copy(
+                        lastMsg = formatted,
+                        lastTime = createdAt
+                    )
                 }
             }
             item
@@ -384,15 +527,66 @@ object SanctuaryCore {
         }
     }
 
-    // 🔌 启动 VoceChat SSE 实时事件流（带指数退避自动重连）
-    fun startSse(serverUrl: String, token: String, myUid: Int) {
+    // 🖼️ 上传当前用户个人头像 (自动缩放到 512px 以内 PNG 提交到 /api/user/avatar)
+    suspend fun uploadUserAvatar(
+        context: Context,
+        serverUrl: String,
+        myUid: Int,
+        rawBytes: ByteArray
+    ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        try {
+            val bmp = decodeSampledBitmap(rawBytes, 512, 512)
+                ?: return@withContext Pair(false, "无法解码所选图片")
+            val baos = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.PNG, 92, baos)
+            val pngBytes = baos.toByteArray()
+
+            val (code, body) = executeAuthorized(context) { tk ->
+                Request.Builder()
+                    .url("$serverUrl/api/user/avatar")
+                    .header("X-API-Key", tk)
+                    .post(pngBytes.toRequestBody("image/png".toMediaType()))
+                    .build()
+            }
+            if (code in 200..299) {
+                val newTs = System.currentTimeMillis()
+                val old = userMap[myUid]
+                if (old != null) {
+                    userMap[myUid] = old.copy(avatarUpdatedAt = newTs)
+                }
+                val newKey = "u_${myUid}_$newTs"
+                val smallBmp = decodeSampledBitmap(pngBytes, 144, 144) ?: bmp
+                avatarMemoryCache.put(newKey, smallBmp)
+                val avatarDir = File(context.cacheDir, "avatars").apply { if (!exists()) mkdirs() }
+                FileOutputStream(File(avatarDir, "$newKey.webp")).use { out ->
+                    smallBmp.compress(Bitmap.CompressFormat.PNG, 90, out)
+                }
+                _userStateEvents.tryEmit(Unit)
+                Pair(true, "头像更换成功")
+            } else {
+                Pair(false, "上传失败 (HTTP $code) $body")
+            }
+        } catch (e: Exception) {
+            Pair(false, "上传异常: ${e.localizedMessage}")
+        }
+    }
+
+    // 🔌 启动 VoceChat SSE 实时事件流（每次重连都先自动续期 Token，绝不再用过期 Token 空转）
+    fun startSse(context: Context, serverUrl: String, myUid: Int) {
+        val appContext = context.applicationContext
         sseJob?.cancel()
         sseJob = sseScope.launch {
             var backoffMs = 2000L
             while (isActive) {
                 try {
+                    val freshToken = ensureValidToken(appContext, forceRenew = false)
+                    if (freshToken.isNullOrEmpty()) {
+                        delay(5000L)
+                        continue
+                    }
+
                     val req = Request.Builder()
-                        .url("$serverUrl/api/user/events?api-key=$token")
+                        .url("$serverUrl/api/user/events?api-key=$freshToken")
                         .header("Accept", "text/event-stream")
                         .get()
                         .build()
@@ -410,6 +604,9 @@ object SanctuaryCore {
                                     }
                                 }
                             }
+                        } else if (response.code == 401 || response.code == 403) {
+                            // SSE 返回 401 说明 Token 刚好到期，立即强制续期后重连
+                            ensureValidToken(appContext, forceRenew = true)
                         }
                     }
                 } catch (_: CancellationException) {
@@ -527,13 +724,14 @@ object SanctuaryCore {
         )
     }
 
-    // 🖼️ 预热有头像的用户，加快首屏与聊天室进入速度
-    fun prewarmAvatars(context: Context, serverUrl: String, token: String) {
+    // 🖼️ 预热有头像的用户（受 avatarSemaphore 限流控制，不与列表请求抢隧道）
+    fun prewarmAvatars(context: Context, serverUrl: String) {
+        val appCtx = context.applicationContext
         userMap.values.filter { it.avatarUpdatedAt > 0L }.forEach { u ->
             val cacheKey = "u_${u.uid}_${u.avatarUpdatedAt}"
             if (avatarMemoryCache.get(cacheKey) == null) {
                 coreScope.launch {
-                    fetchOrLoadAvatarBitmap(context, serverUrl, token, false, u.uid, cacheKey)
+                    fetchOrLoadAvatarBitmap(appCtx, serverUrl, false, u.uid, cacheKey)
                 }
             }
         }
@@ -552,6 +750,9 @@ object SanctuaryCore {
         ivAvatar: ImageView,
         tvFallback: TextView
     ) {
+        if (token.isNotEmpty() && activeToken.isEmpty()) {
+            activeToken = token
+        }
         val resolvedUpdatedAt = if (!isGroup && avatarUpdatedAt == 0L) {
             getAvatarUpdatedAt(id)
         } else {
@@ -570,7 +771,6 @@ object SanctuaryCore {
         val cacheKey = "${if (isGroup) "g" else "u"}_${id}_$resolvedUpdatedAt"
         ivAvatar.tag = cacheKey
 
-        // 1. 命中内存缓存直接渲染
         avatarMemoryCache.get(cacheKey)?.let { bmp ->
             ivAvatar.setImageBitmap(bmp)
             ivAvatar.visibility = View.VISIBLE
@@ -579,7 +779,7 @@ object SanctuaryCore {
         }
 
         scope.launch {
-            val bitmap = fetchOrLoadAvatarBitmap(context, serverUrl, token, isGroup, id, cacheKey)
+            val bitmap = fetchOrLoadAvatarBitmap(context.applicationContext, serverUrl, isGroup, id, cacheKey)
             if (bitmap != null) {
                 withContext(Dispatchers.Main) {
                     if (ivAvatar.tag == cacheKey) {
@@ -595,14 +795,12 @@ object SanctuaryCore {
     private suspend fun fetchOrLoadAvatarBitmap(
         context: Context,
         serverUrl: String,
-        token: String,
         isGroup: Boolean,
         id: Int,
         cacheKey: String
     ): Bitmap? {
         avatarMemoryCache.get(cacheKey)?.let { return it }
 
-        // 先尝试本地磁盘缓存（存的已经是缩放后小图，极速读取）
         val avatarDir = File(context.cacheDir, "avatars").apply { if (!exists()) mkdirs() }
         val diskFile = File(avatarDir, "$cacheKey.webp")
         val legacyFile = File(avatarDir, "$cacheKey.png")
@@ -623,41 +821,42 @@ object SanctuaryCore {
             }
         }
 
-        // 请求去重合并：同一个 cacheKey 正在下载时直接共享同一个 Deferred，绝不重复发网络请求！
         val deferred = inFlightAvatars.getOrPut(cacheKey) {
             coreScope.async {
-                try {
-                    val path = if (isGroup) {
-                        "$serverUrl/api/resource/group_avatar?gid=$id"
-                    } else {
-                        "$serverUrl/api/resource/avatar?uid=$id"
-                    }
-                    val req = Request.Builder()
-                        .url(path)
-                        .header("X-API-Key", token)
-                        .get()
-                        .build()
-                    httpClient.newCall(req).execute().use { res ->
-                        if (res.isSuccessful) {
-                            val bytes = res.body?.bytes()
-                            if (bytes != null && bytes.isNotEmpty()) {
-                                val sampled = decodeSampledBitmap(bytes, 144, 144)
-                                if (sampled != null) {
-                                    avatarMemoryCache.put(cacheKey, sampled)
-                                    // 将缩小后的头像存盘（仅几 KB），下次 1ms 秒读
-                                    FileOutputStream(diskFile).use { out ->
-                                        sampled.compress(Bitmap.CompressFormat.PNG, 90, out)
+                avatarSemaphore.withPermit {
+                    try {
+                        val validTk = ensureValidToken(context, forceRenew = false) ?: activeToken
+                        val path = if (isGroup) {
+                            "$serverUrl/api/resource/group_avatar?gid=$id"
+                        } else {
+                            "$serverUrl/api/resource/avatar?uid=$id"
+                        }
+                        val req = Request.Builder()
+                            .url(path)
+                            .header("X-API-Key", validTk)
+                            .get()
+                            .build()
+                        httpClient.newCall(req).execute().use { res ->
+                            if (res.isSuccessful) {
+                                val bytes = res.body?.bytes()
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    val sampled = decodeSampledBitmap(bytes, 144, 144)
+                                    if (sampled != null) {
+                                        avatarMemoryCache.put(cacheKey, sampled)
+                                        FileOutputStream(diskFile).use { out ->
+                                            sampled.compress(Bitmap.CompressFormat.PNG, 90, out)
+                                        }
+                                        return@withPermit sampled
                                     }
-                                    return@async sampled
                                 }
                             }
                         }
+                        null
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        inFlightAvatars.remove(cacheKey)
                     }
-                    null
-                } catch (_: Exception) {
-                    null
-                } finally {
-                    inFlightAvatars.remove(cacheKey)
                 }
             }
         }
