@@ -92,33 +92,6 @@
                     android:ellipsize="end" />
             </LinearLayout>
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_home_search"
-                style="@style/Widget.MaterialComponents.Button.TextButton"
-                android:layout_width="40dp"
-                android:layout_height="36dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:padding="0dp"
-                android:text="🔍"
-                android:textSize="15sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_home_refresh"
-                style="@style/Widget.MaterialComponents.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:text="刷新"
-                android:textColor="#38BDF8"
-                android:textSize="13sp" />
         </LinearLayout>
 
         <!-- 中间内容容器 -->
@@ -127,120 +100,185 @@
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <!-- 页面 1: 会话列表 -->
-            <LinearLayout
-                android:id="@+id/layout_tab_chats"
+            <!-- 页面 1: 会话列表（带 QQ 风格圆角搜索框 + 花瓣下拉刷新） -->
+            <com.sanctuary.cadice.FlowerPullRefreshLayout
+                android:id="@+id/refresh_chats"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:orientation="vertical">
-
-                <ProgressBar
-                    android:id="@+id/pb_loading"
-                    android:layout_width="32dp"
-                    android:layout_height="32dp"
-                    android:layout_gravity="center"
-                    android:layout_marginTop="24dp"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/tv_empty_chats"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center"
-                    android:textColor="#64748B"
-                    android:textSize="13sp"
-                    android:layout_marginTop="36dp"
-                    android:text="暂无正在进行的会话\n可在「联系人」中点击群组或好友开启聊天"
-                    android:visibility="gone" />
-
-                <androidx.recyclerview.widget.RecyclerView
-                    android:id="@+id/rv_conversations"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:clipToPadding="false"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="8dp" />
-            </LinearLayout>
-
-            <!-- 页面 2: 联系人列表 -->
-            <LinearLayout
-                android:id="@+id/layout_tab_contacts"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:orientation="vertical"
-                android:visibility="gone">
-
-                <TextView
-                    android:id="@+id/tv_contacts_header"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="群聊与好友名录"
-                    android:textColor="#64748B"
-                    android:textSize="12sp"
-                    android:paddingStart="16dp"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="6dp" />
-
-                <androidx.recyclerview.widget.RecyclerView
-                    android:id="@+id/rv_contacts"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent" />
-            </LinearLayout>
-
-            <!-- 页面 3: 空间 Tab (方案 B 预留) -->
-            <ScrollView
-                android:id="@+id/layout_tab_moments"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:visibility="gone">
+                android:layout_height="match_parent">
 
                 <LinearLayout
+                    android:id="@+id/layout_tab_chats"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
+                    android:layout_height="match_parent"
+                    android:orientation="vertical">
 
+                    <!-- QQ 风格顶部圆角搜索框 -->
                     <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/card_qq_search_bar"
                         android:layout_width="match_parent"
-                        android:layout_height="160dp"
-                        app:cardBackgroundColor="#334155"
-                        app:cardCornerRadius="18dp"
-                        app:cardElevation="0dp">
+                        android:layout_height="38dp"
+                        android:layout_marginStart="14dp"
+                        android:layout_marginEnd="14dp"
+                        android:layout_marginTop="10dp"
+                        android:layout_marginBottom="6dp"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:foreground="?android:attr/selectableItemBackground"
+                        app:cardBackgroundColor="#1E293B"
+                        app:cardCornerRadius="19dp"
+                        app:cardElevation="0dp"
+                        app:strokeColor="#334155"
+                        app:strokeWidth="1dp">
 
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="match_parent"
                             android:gravity="center"
-                            android:orientation="vertical">
+                            android:orientation="horizontal"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="14dp">
+
+                            <ImageView
+                                android:id="@+id/iv_qq_search_icon"
+                                android:layout_width="16dp"
+                                android:layout_height="16dp"
+                                android:src="@drawable/ic_search"
+                                android:contentDescription="搜索图标" />
 
                             <TextView
+                                android:id="@+id/tv_qq_search_hint"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="🌸 私有动态空间"
-                                android:textColor="#F8FAFC"
-                                android:textSize="20sp"
-                                android:textStyle="bold" />
-
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="纯血私有微中枢 (Port 3012) 准备就绪"
+                                android:layout_marginStart="6dp"
+                                android:text="搜索聊天记录"
                                 android:textColor="#94A3B8"
-                                android:textSize="12sp"
-                                android:layout_marginTop="6dp" />
+                                android:textSize="13sp" />
                         </LinearLayout>
                     </com.google.android.material.card.MaterialCardView>
 
+                    <ProgressBar
+                        android:id="@+id/pb_loading"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_gravity="center"
+                        android:layout_marginTop="24dp"
+                        android:visibility="gone" />
+
                     <TextView
+                        android:id="@+id/tv_empty_chats"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="✨ 正在打通服务器端 3012 微中枢，届时支持九宫格原图、点赞与楼中楼树状评论！"
+                        android:gravity="center"
                         android:textColor="#64748B"
                         android:textSize="13sp"
-                        android:gravity="center"
-                        android:layout_marginTop="32dp" />
+                        android:layout_marginTop="36dp"
+                        android:text="暂无正在进行的会话\n可在「联系人」中点击群组或好友开启聊天"
+                        android:visibility="gone" />
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/rv_conversations"
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:clipToPadding="false"
+                        android:paddingTop="2dp"
+                        android:paddingBottom="8dp" />
                 </LinearLayout>
-            </ScrollView>
+            </com.sanctuary.cadice.FlowerPullRefreshLayout>
+
+            <!-- 页面 2: 联系人列表（花瓣下拉刷新） -->
+            <com.sanctuary.cadice.FlowerPullRefreshLayout
+                android:id="@+id/refresh_contacts"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/layout_tab_contacts"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tv_contacts_header"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="群聊与好友名录"
+                        android:textColor="#64748B"
+                        android:textSize="12sp"
+                        android:paddingStart="16dp"
+                        android:paddingTop="12dp"
+                        android:paddingBottom="6dp" />
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/rv_contacts"
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+                </LinearLayout>
+            </com.sanctuary.cadice.FlowerPullRefreshLayout>
+
+            <!-- 页面 3: 空间 Tab（花瓣下拉刷新） -->
+            <com.sanctuary.cadice.FlowerPullRefreshLayout
+                android:id="@+id/refresh_moments"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone">
+
+                <ScrollView
+                    android:id="@+id/layout_tab_moments"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:fillViewport="true">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+
+                        <com.google.android.material.card.MaterialCardView
+                            android:layout_width="match_parent"
+                            android:layout_height="160dp"
+                            app:cardBackgroundColor="#334155"
+                            app:cardCornerRadius="18dp"
+                            app:cardElevation="0dp">
+
+                            <LinearLayout
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:gravity="center"
+                                android:orientation="vertical">
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="🌸 私有动态空间"
+                                    android:textColor="#F8FAFC"
+                                    android:textSize="20sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="纯血私有微中枢 (Port 3012) 准备就绪"
+                                    android:textColor="#94A3B8"
+                                    android:textSize="12sp"
+                                    android:layout_marginTop="6dp" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="✨ 正在打通服务器端 3012 微中枢，届时支持九宫格原图、点赞与楼中楼树状评论！"
+                            android:textColor="#64748B"
+                            android:textSize="13sp"
+                            android:gravity="center"
+                            android:layout_marginTop="32dp" />
+                    </LinearLayout>
+                </ScrollView>
+            </com.sanctuary.cadice.FlowerPullRefreshLayout>
         </FrameLayout>
 
         <!-- 底部三大金刚导航栏 -->

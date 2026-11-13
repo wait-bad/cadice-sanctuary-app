@@ -26,7 +26,20 @@ jobs:
         with:
           gradle-version: 8.2
 
+      - name: Restore Persistent Signing Keystore
+        env:
+          VIOLET_KEYSTORE_BASE64: ${{ secrets.VIOLET_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$VIOLET_KEYSTORE_BASE64" ]; then
+            echo "$VIOLET_KEYSTORE_BASE64" | base64 -d > "${RUNNER_TEMP}/violet_im_signing.jks"
+            echo "VIOLET_KEYSTORE_PATH=${RUNNER_TEMP}/violet_im_signing.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Build Debug APK
+        env:
+          VIOLET_STORE_PASS: ${{ secrets.VIOLET_STORE_PASS }}
+          VIOLET_KEY_ALIAS: ${{ secrets.VIOLET_KEY_ALIAS }}
+          VIOLET_KEY_PASS: ${{ secrets.VIOLET_KEY_PASS }}
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APK Artifact
@@ -43,7 +56,8 @@ jobs:
           body: |
             ### 🌸 可黛丝的小窝专属 Android 极简端
             - 构建编号：Build ${{ github.run_number }}
+            - 签名指纹：固定 SHA256 (`7F:3D:5E:5F...F3:B5`)，支持直接覆盖更新！
             - 目标设备：iQOO (OriginOS)
             - 状态：GitHub Actions 云端自动化构建成功！
-            - 使用方式：直接在安卓手机上下载下方 `app-debug.apk` 安装即可体验！
+            - 使用方式：首次切换固定签名需覆盖/卸载旧临时签名版一次，此后永久直接覆盖安装升级！
           files: app/build/outputs/apk/debug/app-debug.apk

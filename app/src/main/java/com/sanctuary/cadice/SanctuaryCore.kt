@@ -74,8 +74,8 @@ object SanctuaryCore {
         .build()
 
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(22, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val req = chain.request().newBuilder()
@@ -84,7 +84,6 @@ object SanctuaryCore {
             chain.proceed(req)
         }
         .build()
-
     val userMap = ConcurrentHashMap<Int, UserProfile>()
     val onlineMap = ConcurrentHashMap<Int, Boolean>()
 
@@ -164,18 +163,24 @@ object SanctuaryCore {
 
     // ==================== 🌐 真实网络状态监听 ====================
 
+    @Volatile
+    private var currentNetworkHandle: Long = -1L
+
     fun ensureNetworkMonitor(context: Context) {
         if (!networkCallbackRegistered.compareAndSet(false, true)) return
         try {
             val appCtx = context.applicationContext
             val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            checkValidatedAndWake(cm)
+            checkValidatedAndWake(cm, forceReconnect = false)
             val req = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
             cm.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    checkValidatedAndWake(cm)
+                    val handle = network.networkHandle
+                    val switched = (currentNetworkHandle != -1L && currentNetworkHandle != handle)
+                    currentNetworkHandle = handle
+                    checkValidatedAndWake(cm, forceReconnect = switched)
                 }
 
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -194,6 +199,7 @@ object SanctuaryCore {
                     if (!stillHasNet) {
                         isSseConnected = false
                         _connectionStateEvents.tryEmit(false)
+                        activeSseCall?.cancel()
                     }
                 }
             })
@@ -203,15 +209,19 @@ object SanctuaryCore {
         }
     }
 
-    private fun checkValidatedAndWake(cm: ConnectivityManager) {
+    private fun checkValidatedAndWake(cm: ConnectivityManager, forceReconnect: Boolean) {
         val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
         val hasNet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         isNetworkValidated = hasNet
         if (hasNet) {
+            if (forceReconnect) {
+                // Wi-Fi <-> 5G 切换瞬间强行掐断旧网卡死流，立即在新网络重连！
+                httpClient.connectionPool.evictAll()
+                activeSseCall?.cancel()
+            }
             sseWakeupChannel.trySend(Unit)
         }
     }
-    // ==================== 🔖 持久化游标 ====================
 
     private fun readMidKey(myUid: Int, isGroup: Boolean, targetId: Int): String {
         return "read_mid_${myUid}_${if (isGroup) "g" else "u"}_$targetId"
@@ -1064,7 +1074,29 @@ object SanctuaryCore {
         return deferred.await()
     }
 
-    // ==================== 🔌 增量 SSE 实时事件流 + 35s 假死心跳看门狗 + 300ms 微批收集 ====================
+    // ==================== 🔌 增量 SSE 实时事件流 + 20s 心跳看门狗 + 1秒极速自愈 ====================
+
+    @Volatile
+    private var lastSsePacketAt: Long = 0L
+
+    fun pokeOrRestartSse(context: Context, serverUrl: String, myUid: Int) {
+        val job = sseJob
+        val now = System.currentTimeMillis()
+        if (job == null || !job.isActive) {
+            startSse(context, serverUrl, myUid)
+            return
+        }
+        // 若超过 8 秒未收到服务器 5s 心跳包或当前未连接，立刻强制踢一脚重连
+        if (!isSseConnected || (lastSsePacketAt > 0L && now - lastSsePacketAt > 8_500L)) {
+            httpClient.connectionPool.evictAll()
+            activeSseCall?.cancel()
+            sseWakeupChannel.trySend(Unit)
+        }
+    }
+
+    fun pauseSseForBackground() {
+        stopSse()
+    }
 
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
         val appContext = context.applicationContext
@@ -1073,12 +1105,12 @@ object SanctuaryCore {
 
         sseJob?.cancel()
         sseJob = sseScope.launch {
-            var backoffMs = 2000L
+            var backoffMs = 1000L
             while (isActive) {
                 if (!isNetworkValidated) {
                     isSseConnected = false
                     _connectionStateEvents.tryEmit(false)
-                    withTimeoutOrNull(6000L) {
+                    withTimeoutOrNull(3000L) {
                         sseWakeupChannel.receive()
                     }
                     continue
@@ -1087,7 +1119,7 @@ object SanctuaryCore {
                 try {
                     val freshToken = ensureValidToken(appContext, forceRenew = false)
                     if (freshToken.isNullOrEmpty()) {
-                        delay(4000L)
+                        delay(2500L)
                         continue
                     }
 
@@ -1106,13 +1138,14 @@ object SanctuaryCore {
 
                     var sseReady = false
                     val lastActivityAt = AtomicLong(System.currentTimeMillis())
+                    lastSsePacketAt = lastActivityAt.get()
                     val call = sseClient.newCall(req)
                     activeSseCall = call
 
                     val watchdogJob = launch {
                         while (isActive) {
-                            delay(10_000L)
-                            if (System.currentTimeMillis() - lastActivityAt.get() > 38_000L) {
+                            delay(5_000L)
+                            if (System.currentTimeMillis() - lastActivityAt.get() > 20_000L) {
                                 call.cancel()
                                 break
                             }
@@ -1122,13 +1155,15 @@ object SanctuaryCore {
                     try {
                         call.execute().use { response ->
                             if (response.isSuccessful) {
-                                backoffMs = 2000L
+                                backoffMs = 1000L
                                 isSseConnected = true
                                 _connectionStateEvents.tryEmit(true)
                                 val source = response.body?.source()
                                 while (isActive && source != null && !source.exhausted()) {
                                     val line = source.readUtf8Line() ?: break
-                                    lastActivityAt.set(System.currentTimeMillis())
+                                    val now = System.currentTimeMillis()
+                                    lastActivityAt.set(now)
+                                    lastSsePacketAt = now
                                     if (line.startsWith("data:")) {
                                         val jsonText = line.removePrefix("data:").trim()
                                         if (jsonText.startsWith("{")) {
@@ -1157,7 +1192,7 @@ object SanctuaryCore {
                 withTimeoutOrNull(backoffMs) {
                     sseWakeupChannel.receive()
                 }
-                backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
+                backoffMs = (backoffMs * 2).coerceAtMost(6_000L)
             }
         }
     }

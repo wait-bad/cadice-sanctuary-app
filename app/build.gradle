@@ -11,14 +11,35 @@ android {
         applicationId "com.sanctuary.cadice"
         minSdk 26
         targetSdk 34
-        versionCode 13
-        versionName "1.7.1"
+        versionCode 14
+        versionName "1.7.2"
+    }
+
+    signingConfigs {
+        violetPersistent {
+            def ksPath = System.getenv("VIOLET_KEYSTORE_PATH") ?: "${System.getProperty('user.home')}/.android/violet_im_signing.jks"
+            def ksFile = file(ksPath)
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword System.getenv("VIOLET_STORE_PASS") ?: "VioletSanctuary2026"
+                keyAlias System.getenv("VIOLET_KEY_ALIAS") ?: "violet_im"
+                keyPassword System.getenv("VIOLET_KEY_PASS") ?: "VioletSanctuary2026"
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (signingConfigs.violetPersistent.storeFile != null) {
+                signingConfig signingConfigs.violetPersistent
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingConfigs.violetPersistent.storeFile != null) {
+                signingConfig signingConfigs.violetPersistent
+            }
         }
     }
     compileOptions {

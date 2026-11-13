@@ -38,9 +38,10 @@ class HomeActivity : AppCompatActivity() {
 
     private val conversationList = mutableListOf<ConversationItem>()
     private val contactList = mutableListOf<ConversationItem>()
-
     private lateinit var conversationAdapter: ConversationAdapter
     private lateinit var contactAdapter: ConversationAdapter
+    private lateinit var refreshChats: FlowerPullRefreshLayout
+    private lateinit var refreshMoments: FlowerPullRefreshLayout
 
     private var activeIsGroup: Boolean? = null
     private var activeTargetId: Int = -1
@@ -107,18 +108,29 @@ class HomeActivity : AppCompatActivity() {
             drawerLayout.closeDrawer(GravityCompat.START)
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-
-        findViewById<MaterialButton>(R.id.btn_home_search).setOnClickListener {
+        findViewById<View>(R.id.card_qq_search_bar).setOnClickListener {
             startActivity(Intent(this, SearchActivity::class.java))
         }
 
-        findViewById<MaterialButton>(R.id.btn_home_refresh).setOnClickListener {
-            loadData(showSpinner = true)
+        refreshChats = findViewById(R.id.refresh_chats)
+        refreshContacts = findViewById(R.id.refresh_contacts)
+        refreshMoments = findViewById(R.id.refresh_moments)
+
+        refreshChats.setOnRefreshListener {
+            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            loadData(showSpinner = false, pullLayout = refreshChats)
+        }
+        refreshContacts.setOnRefreshListener {
+            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            loadData(showSpinner = false, pullLayout = refreshContacts)
+        }
+        refreshMoments.setOnRefreshListener {
+            SanctuaryCore.pokeOrRestartSse(this, serverUrl, myUid)
+            loadData(showSpinner = false, pullLayout = refreshMoments)
         }
         findViewById<MaterialButton>(R.id.btn_home_logout).setOnClickListener {
             logoutToLogin("已退出登录")
         }
-
         val rvConversations = findViewById<RecyclerView>(R.id.rv_conversations)
         val rvContacts = findViewById<RecyclerView>(R.id.rv_contacts)
 
@@ -278,6 +290,8 @@ class HomeActivity : AppCompatActivity() {
         val tvTitle = findViewById<TextView>(R.id.tv_home_title)
         val tvContactsHeader = findViewById<TextView>(R.id.tv_contacts_header)
         val cardMyAvatar = findViewById<MaterialCardView>(R.id.card_my_avatar)
+        val cardSearchBar = findViewById<MaterialCardView>(R.id.card_qq_search_bar)
+        val tvSearchHint = findViewById<TextView>(R.id.tv_qq_search_hint)
 
         val drawerContainer = findViewById<LinearLayout>(R.id.drawer_container)
         val drawerHeader = findViewById<LinearLayout>(R.id.drawer_header)
@@ -291,6 +305,11 @@ class HomeActivity : AppCompatActivity() {
         val tvSettingsLabel = findViewById<TextView>(R.id.tv_drawer_settings_label)
         val tvSettingsHint = findViewById<TextView>(R.id.tv_drawer_settings_hint)
 
+        if (::refreshChats.isInitialized) {
+            refreshChats.setThemeDark(isDarkTheme)
+            refreshContacts.setThemeDark(isDarkTheme)
+            refreshMoments.setThemeDark(isDarkTheme)
+        }
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         if (isDarkTheme) {
             val bg = Color.parseColor("#0F172A")
@@ -310,8 +329,9 @@ class HomeActivity : AppCompatActivity() {
             tvTitle.setTextColor(textMain)
             tvContactsHeader.setTextColor(Color.parseColor("#64748B"))
             cardMyAvatar.strokeColor = stroke
-
-            drawerContainer.setBackgroundColor(bar)
+            cardSearchBar.setCardBackgroundColor(bar)
+            cardSearchBar.strokeColor = stroke
+            tvSearchHint.setTextColor(textSub)
             drawerHeader.setBackgroundColor(bg)
             tvDrawerName.setTextColor(textMain)
             tvDrawerServer.setTextColor(textSub)
@@ -346,8 +366,9 @@ class HomeActivity : AppCompatActivity() {
             tvTitle.setTextColor(textMain)
             tvContactsHeader.setTextColor(textSub)
             cardMyAvatar.strokeColor = stroke
-
-            drawerContainer.setBackgroundColor(bar)
+            cardSearchBar.setCardBackgroundColor(bar)
+            cardSearchBar.strokeColor = stroke
+            tvSearchHint.setTextColor(textSub)
             drawerHeader.setBackgroundColor(bg)
             tvDrawerName.setTextColor(textMain)
             tvDrawerServer.setTextColor(textSub)
@@ -368,9 +389,9 @@ class HomeActivity : AppCompatActivity() {
     }
 
     private fun setupNavigation() {
-        val tabChats = findViewById<View>(R.id.layout_tab_chats)
-        val tabContacts = findViewById<View>(R.id.layout_tab_contacts)
-        val tabMoments = findViewById<View>(R.id.layout_tab_moments)
+        val tabChats = findViewById<View>(R.id.refresh_chats)
+        val tabContacts = findViewById<View>(R.id.refresh_contacts)
+        val tabMoments = findViewById<View>(R.id.refresh_moments)
 
         val navChats = findViewById<View>(R.id.nav_chats)
         val navContacts = findViewById<View>(R.id.nav_contacts)
@@ -580,7 +601,7 @@ class HomeActivity : AppCompatActivity() {
         )
     }
 
-    private fun loadData(showSpinner: Boolean) {
+    private fun loadData(showSpinner: Boolean, pullLayout: FlowerPullRefreshLayout? = null) {
         val pbLoading = findViewById<ProgressBar>(R.id.pb_loading)
         val tvEmpty = findViewById<TextView>(R.id.tv_empty_chats)
 
@@ -590,6 +611,7 @@ class HomeActivity : AppCompatActivity() {
         tvEmpty.visibility = View.GONE
 
         lifecycleScope.launch {
+            var refreshOk = false
             try {
                 val (baseConvs, contacts) = SanctuaryCore.fetchBaseDirectory(
                     context = this@HomeActivity,
@@ -622,6 +644,7 @@ class HomeActivity : AppCompatActivity() {
                     conversationList.addAll(reconcileUnreadWithLocalCursor(mergedBase))
                     contactList.clear()
                     contactList.addAll(contacts)
+                    refreshOk = true
                 }
 
                 pbLoading.visibility = View.GONE
@@ -650,9 +673,13 @@ class HomeActivity : AppCompatActivity() {
 
                 SanctuaryCore.saveHomeSnapshot(this@HomeActivity, serverUrl, myUid, finalConvs)
             } catch (e: Exception) {
-                Toast.makeText(this@HomeActivity, "刷新失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                refreshOk = false
+                if (pullLayout == null) {
+                    Toast.makeText(this@HomeActivity, "刷新失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
             } finally {
                 pbLoading.visibility = View.GONE
+                pullLayout?.finishRefresh(success = refreshOk)
             }
         }
     }
