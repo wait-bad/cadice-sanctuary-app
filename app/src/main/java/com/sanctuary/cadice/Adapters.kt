@@ -383,7 +383,7 @@ class SwipeReplyCallback(
     }
 
     override fun getSwipeDirs(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder): Int {
-        val pos = viewHolder.bindingAdapterPosition
+        val pos = viewHolder.adapterPosition
         if (pos == RecyclerView.NO_POSITION) return 0
         val row = adapter.currentList.getOrNull(pos) ?: return 0
         if (row !is ChatListRow.MessageRow || row.message.syncStatus != ChatMessage.STATUS_SENT) {
@@ -417,7 +417,7 @@ class SwipeReplyCallback(
         val clampedDx = dX.coerceIn(0f, maxPull)
         if (clampedDx >= maxPull * 0.72f && isCurrentlyActive && !triggered) {
             triggered = true
-            val pos = viewHolder.bindingAdapterPosition
+            val pos = viewHolder.adapterPosition
             val row = if (pos != RecyclerView.NO_POSITION) adapter.currentList.getOrNull(pos) else null
             if (row is ChatListRow.MessageRow) {
                 viewHolder.itemView.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
