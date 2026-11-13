@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Dispatcher
@@ -1130,8 +1132,11 @@ object SanctuaryCore {
         }
     }
 
+    fun pauseSseForBackground() {
+        stopSse()
+    }
+
     fun startSse(context: Context, serverUrl: String, myUid: Int) {
-        val appContext = context.applicationContext
         ensureNetworkMonitor(appContext)
         startMicroBatchCollector(appContext)
 
