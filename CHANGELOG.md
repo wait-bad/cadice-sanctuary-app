@@ -1,6 +1,25 @@
 # 📜 Violet IM (`cadice-sanctuary-app`) 版本演进与架构改动记录
 
-本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.1` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.2` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+
+---
+
+## ⚡ v1.7.2（Build 20 · 1秒极速重连 + QQ风格搜索栏 + 三页花瓣下拉刷新 + 永久固定签名）
+
+### 🔌 1. 秒级断网重连自愈 + 智能省电 (`VioletApp.kt` / `SanctuaryCore.kt`)
+- **适配 VoceChat 5s/15s 心跳节奏**：将 SSE `readTimeout` 从 `0`（无限死等）收紧为 `22 秒`，假死看门狗阈值从 `38s` 压缩至 `20s`；
+- **Wi-Fi ↔ 5G 切换秒换线**：`NetworkCallback` 记录 `networkHandle`，只要底层网络切换即刻 `evictAll()` + 取消旧流并唤醒新连；
+- **前后台智能生命周期管家 (`VioletApp`)**：未开启后台保活时切后台自动优雅休眠（接近 0 耗电），切回前台瞬间调用 `pokeOrRestartSse` 秒速拉起并缩短退避上限至 `6 秒`（消除原本长达 1~2 分钟的重连卡顿）。
+
+### 🌸 2. QQ 风格圆角搜索栏 & 跨三页「小花」下拉刷新 (`FlowerPullRefreshLayout.kt` / `HomeActivity.kt`)
+- **QQ 风格消息顶部搜索栏**：移除顶栏独立的搜索与刷新文字按钮，在消息页最上方植入圆角搜索胶囊与极简矢量搜索图标 (`ic_search.xml`)；
+- **三页通用花瓣下拉刷新 (`FlowerPullRefreshLayout`)**：在「消息」「联系人」「空间」三个页面下拉时与顶栏拉出平滑阻尼间距并出现**旋转五瓣小花**：
+  - 刷新成功：小花瞬间**分解成 7 片零散花瓣**优雅飘落渐隐后回弹收起；
+  - 刷新失败：小花**持续旋转**提醒（点击小花或再拉可重试，上滑自动收起）。
+
+### 🔐 3. 永久固定签名指纹（告别反复卸载！）(`app/build.gradle` / `.github/workflows/build.yml`)
+- 生成 100 年有效期专用签名密钥库 `violet_im_signing.jks`（SHA256: `7F:3D:5E:5F:F9:18:42:87:2B:ED:84:C4:87:92:BC:8C:9A:97:61:32:B6:26:3E:81:1A:30:8A:24:3E:23:F3:B5`）并通过 GitHub Secrets 持久化注入 CI；
+- 今后每次新版本 APK 均保持完全一致的签名指纹，**手机端直接覆盖安装升级即可，聊天记录和登录状态全部保留**！
 
 ---
 
