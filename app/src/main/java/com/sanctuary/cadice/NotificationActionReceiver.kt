@@ -43,18 +43,17 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 val appCtx = context.applicationContext
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        val (ok, realMid) = SanctuaryCore.sendTextQueued(appCtx, serverUrl, isGroup, targetId, replyText)
-                        if (ok && realMid > 0L) {
-                            SanctuaryCore.updateGlobalMaxMid(appCtx, myUid, realMid)
-                            SanctuaryCore.markConversationRead(appCtx, serverUrl, myUid, isGroup, targetId, realMid)
+                        val res = SanctuaryCore.sendTextQueued(appCtx, serverUrl, isGroup, targetId, replyText)
+                        if (res.success && res.mid > 0L) {
+                            SanctuaryCore.updateGlobalMaxMid(appCtx, myUid, res.mid)
+                            SanctuaryCore.markConversationRead(appCtx, serverUrl, myUid, isGroup, targetId, res.mid)
                             SanctuaryDb.getInstance(appCtx).upsertSingleMessage(
                                 serverUrl, myUid, isGroup, targetId,
                                 ChatMessage(
-                                    mid = realMid,
+                                    mid = res.mid,
                                     fromUid = myUid,
                                     fromName = myName,
                                     fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(myUid),
-                                    content = replyText,
                                     createdAt = System.currentTimeMillis(),
                                     isSelf = true,
                                     syncStatus = ChatMessage.STATUS_SENT

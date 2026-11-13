@@ -162,13 +162,14 @@ object SanctuaryCore {
         NotificationHelper.clearAllNotifications(context)
     }
 
-    // ==================== 🌐 真实网络状态监听（NET_CAPABILITY_VALIDATED） ====================
+    // ==================== 🌐 真实网络状态监听 ====================
 
     fun ensureNetworkMonitor(context: Context) {
         if (!networkCallbackRegistered.compareAndSet(false, true)) return
         try {
             val appCtx = context.applicationContext
             val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            checkValidatedAndWake(cm)
             val req = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
@@ -178,20 +179,19 @@ object SanctuaryCore {
                 }
 
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                    val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    val hasNet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     val wasDown = !isNetworkValidated
-                    isNetworkValidated = validated
-                    if (validated && wasDown) {
+                    isNetworkValidated = hasNet
+                    if (hasNet && wasDown) {
                         sseWakeupChannel.trySend(Unit)
                     }
                 }
 
                 override fun onLost(network: Network) {
                     val active = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
-                    val stillValid = active?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-                    isNetworkValidated = stillValid
-                    if (!stillValid) {
+                    val stillHasNet = active?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                    isNetworkValidated = stillHasNet
+                    if (!stillHasNet) {
                         isSseConnected = false
                         _connectionStateEvents.tryEmit(false)
                     }
@@ -199,19 +199,18 @@ object SanctuaryCore {
             })
         } catch (_: Exception) {
             networkCallbackRegistered.set(false)
+            isNetworkValidated = true
         }
     }
 
     private fun checkValidatedAndWake(cm: ConnectivityManager) {
         val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
-        val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        isNetworkValidated = validated
-        if (validated) {
+        val hasNet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        isNetworkValidated = hasNet
+        if (hasNet) {
             sseWakeupChannel.trySend(Unit)
         }
     }
-
     // ==================== 🔖 持久化游标 ====================
 
     private fun readMidKey(myUid: Int, isGroup: Boolean, targetId: Int): String {
@@ -394,6 +393,13 @@ object SanctuaryCore {
         return sendSequencers.getOrPut(key) { Mutex() }
     }
 
+    data class SendResult(
+        val success: Boolean,
+        val mid: Long = 0L,
+        val filePath: String = "",
+        val error: String = ""
+    )
+
     suspend fun sendTextQueued(
         context: Context,
         serverUrl: String,
@@ -401,7 +407,7 @@ object SanctuaryCore {
         targetId: Int,
         text: String,
         replyToMid: Long = 0L
-    ): Pair<Boolean, Long> {
+    ): SendResult {
         val mutex = getConversationMutex(isGroup, targetId)
         return mutex.withLock {
             try {
@@ -412,22 +418,24 @@ object SanctuaryCore {
                 } else {
                     "$serverUrl/api/user/$targetId/send"
                 }
-                val mediaType = "text/plain; charset=utf-8".toMediaType()
+                // 关键修复：必须使用 ByteArray.toRequestBody("text/plain".toMediaType())，
+                // 否则 OkHttp 的 String.toRequestBody 会自动拼接 "; charset=utf-8" 导致 VoceChat 报错 HTTP 415！
+                val bodyBytes = text.toByteArray(Charsets.UTF_8)
                 val (code, body) = executeAuthorized(context.applicationContext) { tk ->
                     Request.Builder()
                         .url(url)
                         .header("X-API-Key", tk)
-                        .post(text.toRequestBody(mediaType))
+                        .post(bodyBytes.toRequestBody("text/plain".toMediaType()))
                         .build()
                 }
                 if (code in 200..299) {
                     val mid = body.trim().toLongOrNull() ?: System.currentTimeMillis()
-                    Pair(true, mid)
+                    SendResult(success = true, mid = mid)
                 } else {
-                    Pair(false, 0L)
+                    SendResult(success = false, error = "HTTP $code: ${body.take(120)}")
                 }
-            } catch (_: Exception) {
-                Pair(false, 0L)
+            } catch (e: Exception) {
+                SendResult(success = false, error = e.localizedMessage ?: "网络异常")
             }
         }
     }
@@ -438,34 +446,37 @@ object SanctuaryCore {
         isGroup: Boolean,
         targetId: Int,
         compressed: CompressedImageResult
-    ): Triple<Boolean, Long, String> {
+    ): SendResult {
         val mutex = getConversationMutex(isGroup, targetId)
         return mutex.withLock {
             try {
                 val filePath = uploadImageFile(context.applicationContext, serverUrl, compressed.bytes, compressed.fileName)
-                    ?: return@withLock Triple(false, 0L, "")
+                    ?: return@withLock SendResult(success = false, error = "图片分片上传失败")
 
                 val sendUrl = if (isGroup) {
                     "$serverUrl/api/group/$targetId/send"
                 } else {
                     "$serverUrl/api/user/$targetId/send"
                 }
-                val payload = JSONObject().apply { put("path", filePath) }.toString()
+                val payloadBytes = JSONObject().apply { put("path", filePath) }
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+                // 同样必须使用 ByteArray.toRequestBody，避免 OkHttp 自动附加 charset=utf-8 导致 HTTP 415
                 val (code, body) = executeAuthorized(context.applicationContext) { tk ->
                     Request.Builder()
                         .url(sendUrl)
                         .header("X-API-Key", tk)
-                        .post(payload.toRequestBody("vocechat/file".toMediaType()))
+                        .post(payloadBytes.toRequestBody("vocechat/file".toMediaType()))
                         .build()
                 }
                 if (code in 200..299) {
                     val mid = body.trim().toLongOrNull() ?: System.currentTimeMillis()
-                    Triple(true, mid, filePath)
+                    SendResult(success = true, mid = mid, filePath = filePath)
                 } else {
-                    Triple(false, 0L, filePath)
+                    SendResult(success = false, filePath = filePath, error = "HTTP $code: ${body.take(120)}")
                 }
-            } catch (_: Exception) {
-                Triple(false, 0L, "")
+            } catch (e: Exception) {
+                SendResult(success = false, error = e.localizedMessage ?: "发送图片异常")
             }
         }
     }

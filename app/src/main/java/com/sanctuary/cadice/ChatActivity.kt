@@ -728,13 +728,13 @@ class ChatActivity : AppCompatActivity() {
             messageList.add(optimisticImg)
             submitRows(scrollToBottom = true)
 
-            val (ok, realMid, serverPath) = SanctuaryCore.uploadAndSendImageQueued(
+            val res = SanctuaryCore.uploadAndSendImageQueued(
                 this@ChatActivity, serverUrl, isGroup, targetId, compressed
             )
-            if (ok && realMid > 0L) {
-                promoteSentMessage(optimisticImg.mid, realMid, serverPath)
+            if (res.success && res.mid > 0L) {
+                promoteSentMessage(optimisticImg.mid, res.mid, res.filePath)
             } else {
-                markSendFailed(optimisticImg.mid)
+                markSendFailed(optimisticImg.mid, res.error)
             }
         }
     }
@@ -751,7 +751,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun dispatchSendText(pendingMsg: ChatMessage) {
         lifecycleScope.launch {
-            val (ok, realMid) = SanctuaryCore.sendTextQueued(
+            val res = SanctuaryCore.sendTextQueued(
                 context = this@ChatActivity,
                 serverUrl = serverUrl,
                 isGroup = isGroup,
@@ -759,10 +759,10 @@ class ChatActivity : AppCompatActivity() {
                 text = pendingMsg.content,
                 replyToMid = pendingMsg.replyToMid
             )
-            if (ok && realMid > 0L) {
-                promoteSentMessage(pendingMsg.mid, realMid, "")
+            if (res.success && res.mid > 0L) {
+                promoteSentMessage(pendingMsg.mid, res.mid, "")
             } else {
-                markSendFailed(pendingMsg.mid)
+                markSendFailed(pendingMsg.mid, res.error)
             }
         }
     }
@@ -790,7 +790,7 @@ class ChatActivity : AppCompatActivity() {
         SanctuaryCore.markConversationRead(this, serverUrl, myUid, isGroup, targetId, realMid)
     }
 
-    private fun markSendFailed(tempMid: Long) {
+    private fun markSendFailed(tempMid: Long, errorMsg: String = "") {
         val curIdx = messageList.indexOfFirst { it.mid == tempMid }
         if (curIdx != -1) {
             messageList[curIdx] = messageList[curIdx].copy(syncStatus = ChatMessage.STATUS_FAILED)
@@ -799,5 +799,8 @@ class ChatActivity : AppCompatActivity() {
         SanctuaryCore.updateLocalMessageStatus(
             this, serverUrl, myUid, isGroup, targetId, tempMid, ChatMessage.STATUS_FAILED
         )
+        if (errorMsg.isNotBlank()) {
+            Toast.makeText(this, "发送失败: $errorMsg", Toast.LENGTH_SHORT).show()
+        }
     }
 }

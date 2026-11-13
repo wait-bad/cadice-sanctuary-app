@@ -88,21 +88,21 @@ class ShareReceiverActivity : AppCompatActivity() {
                     MediaHelper.compressAndStripExif(this@ShareReceiverActivity, imgUri)
                 }
                 if (compressed != null) {
-                    val (sent, mid, _) = SanctuaryCore.uploadAndSendImageQueued(
+                    val res = SanctuaryCore.uploadAndSendImageQueued(
                         this@ShareReceiverActivity, serverUrl, target.isGroup, target.id, compressed
                     )
-                    ok = sent
-                    if (sent && mid > 0L) {
-                        SanctuaryCore.updateGlobalMaxMid(this@ShareReceiverActivity, myUid, mid)
+                    ok = res.success
+                    if (res.success && res.mid > 0L) {
+                        SanctuaryCore.updateGlobalMaxMid(this@ShareReceiverActivity, myUid, res.mid)
                     }
                 }
             } else if (!txt.isNullOrEmpty()) {
-                val (sent, mid) = SanctuaryCore.sendTextQueued(
+                val res = SanctuaryCore.sendTextQueued(
                     this@ShareReceiverActivity, serverUrl, target.isGroup, target.id, txt
                 )
-                ok = sent
-                if (sent && mid > 0L) {
-                    SanctuaryCore.updateGlobalMaxMid(this@ShareReceiverActivity, myUid, mid)
+                ok = res.success
+                if (res.success && res.mid > 0L) {
+                    SanctuaryCore.updateGlobalMaxMid(this@ShareReceiverActivity, myUid, res.mid)
                 }
             }
 
