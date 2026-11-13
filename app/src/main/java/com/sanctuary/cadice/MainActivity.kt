@@ -1,16 +1,21 @@
 package com.sanctuary.cadice
 
+import android.animation.ObjectAnimator
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.os.Bundle
+import android.text.method.HideReturnsTransformationMethod
+import android.text.method.PasswordTransformationMethod
+import android.view.LayoutInflater
 import android.view.View
-import android.widget.Button
-import android.widget.EditText
-import android.widget.TextView
-import android.widget.Toast
+import android.view.animation.LinearInterpolator
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -18,6 +23,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
@@ -29,16 +35,22 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
+    private var isDarkTheme = true
+    private var isPasswordVisible = false
+    private lateinit var flowerAnim: ObjectAnimator
+
     companion object {
         private const val PREFS_NAME = "cadice_sanctuary_prefs"
         private const val KEY_SERVER_URL = "server_url"
+        private const val KEY_SERVER_HISTORY = "server_history"
+        private const val KEY_DARK_THEME = "dark_theme"
         private const val KEY_TOKEN = "token"
         private const val KEY_USER_NAME = "user_name"
         private const val KEY_USER_UID = "user_uid"
         private const val KEY_IS_ADMIN = "is_admin"
 
-        private const val DEFAULT_REMOTE_SERVER = "https://chat.waitb.sbs"
-        private const val DEFAULT_LOCAL_SERVER = "http://192.168.1.20:3009"
+        private const val DEFAULT_REMOTE = "https://chat.waitb.sbs"
+        private const val DEFAULT_LOCAL = "http://192.168.1.20:3009"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,7 +58,7 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 1. 如果已存在有效登录态，直接秒跳主界面！
+        // 1. 若已有登录态，直接秒跳主界面！
         val existingToken = prefs.getString(KEY_TOKEN, null)
         val existingUid = prefs.getInt(KEY_USER_UID, -1)
         if (!existingToken.isNullOrEmpty() && existingUid != -1) {
@@ -56,91 +68,71 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_main)
 
-        val etServerUrl = findViewById<EditText>(R.id.et_server_url)
-        val btnQuickRemote = findViewById<Button>(R.id.btn_quick_remote)
-        val btnQuickLocal = findViewById<Button>(R.id.btn_quick_local)
-        val btnPingServer = findViewById<Button>(R.id.btn_ping_server)
-        val tvPingResult = findViewById<TextView>(R.id.tv_ping_result)
+        // 2. 绑定核心控件
+        val tvRotatingFlower = findViewById<TextView>(R.id.tv_rotating_flower)
+        val tvCurrentServerDisplay = findViewById<TextView>(R.id.tv_current_server_display)
+        val btnOpenServerModal = findViewById<MaterialCardView>(R.id.btn_open_server_modal)
 
         val etEmail = findViewById<EditText>(R.id.et_email)
         val etPassword = findViewById<EditText>(R.id.et_password)
+        val btnTogglePwd = findViewById<TextView>(R.id.btn_toggle_pwd)
         val btnLogin = findViewById<Button>(R.id.btn_login)
 
-        // 回显已保存的服务器端点
-        val savedServer = prefs.getString(KEY_SERVER_URL, DEFAULT_REMOTE_SERVER) ?: DEFAULT_REMOTE_SERVER
-        etServerUrl.setText(savedServer)
+        val btnToggleTheme = findViewById<LinearLayout>(R.id.btn_toggle_theme)
 
-        // 快速切换预设
-        btnQuickRemote.setOnClickListener {
-            etServerUrl.setText(DEFAULT_REMOTE_SERVER)
-            saveServerUrl(DEFAULT_REMOTE_SERVER)
-            Toast.makeText(this, "已选择公网隧道通道", Toast.LENGTH_SHORT).show()
+        // 3. 启动小花缓慢自转动画 (12秒一圈，优雅从容)
+        flowerAnim = ObjectAnimator.ofFloat(tvRotatingFlower, "rotation", 0f, 360f).apply {
+            duration = 12000
+            repeatCount = ObjectAnimator.INFINITE
+            interpolator = LinearInterpolator()
+        }
+        flowerAnim.start()
+
+        // 4. 初始化并回显当前服务器
+        val currentServer = prefs.getString(KEY_SERVER_URL, DEFAULT_REMOTE) ?: DEFAULT_REMOTE
+        tvCurrentServerDisplay.text = formatServerDisplay(currentServer)
+
+        // 5. 初始化明暗主题
+        isDarkTheme = prefs.getBoolean(KEY_DARK_THEME, true)
+        applyTheme(isDarkTheme)
+
+        btnToggleTheme.setOnClickListener {
+            isDarkTheme = !isDarkTheme
+            prefs.edit().putBoolean(KEY_DARK_THEME, isDarkTheme).apply()
+            applyTheme(isDarkTheme)
         }
 
-        btnQuickLocal.setOnClickListener {
-            etServerUrl.setText(DEFAULT_LOCAL_SERVER)
-            saveServerUrl(DEFAULT_LOCAL_SERVER)
-            Toast.makeText(this, "已选择局域网内网通道", Toast.LENGTH_SHORT).show()
-        }
-
-        // 测速探针
-        btnPingServer.setOnClickListener {
-            val serverUrl = cleanUrl(etServerUrl.text.toString().trim())
-            if (serverUrl.isEmpty()) {
-                Toast.makeText(this, "请输入服务器地址", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+        // 6. 密码明文/密文切换 (👁️)
+        btnTogglePwd.setOnClickListener {
+            isPasswordVisible = !isPasswordVisible
+            if (isPasswordVisible) {
+                etPassword.transformationMethod = HideReturnsTransformationMethod.getInstance()
+                btnTogglePwd.text = "👁️"
+            } else {
+                etPassword.transformationMethod = PasswordTransformationMethod.getInstance()
+                btnTogglePwd.text = "🙈"
             }
-            saveServerUrl(serverUrl)
-
-            tvPingResult.visibility = View.VISIBLE
-            tvPingResult.setTextColor(0xFF38BDF8.toInt())
-            tvPingResult.text = "⚡ 正在握手探测..."
-
-            lifecycleScope.launch {
-                val start = System.currentTimeMillis()
-                try {
-                    val req = Request.Builder()
-                        .url("$serverUrl/api/admin/system/organization")
-                        .get()
-                        .build()
-
-                    val response = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-                    val duration = System.currentTimeMillis() - start
-                    val body = response.body?.string().orEmpty()
-
-                    if (response.isSuccessful) {
-                        val orgName = try {
-                            JSONObject(body).optString("name", "VoceChat Server")
-                        } catch (e: Exception) {
-                            "VoceChat Server"
-                        }
-                        tvPingResult.setTextColor(0xFF10B981.toInt())
-                        tvPingResult.text = "🟢 连接正常 · 延迟 ${duration}ms · 服务: $orgName"
-                    } else {
-                        tvPingResult.setTextColor(0xFFEF4444.toInt())
-                        tvPingResult.text = "🔴 响应异常 (HTTP ${response.code})"
-                    }
-                } catch (e: Exception) {
-                    tvPingResult.setTextColor(0xFFEF4444.toInt())
-                    tvPingResult.text = "🔴 连接失败: ${e.localizedMessage ?: e.javaClass.simpleName}"
-                }
-            }
+            etPassword.setSelection(etPassword.text.length)
         }
 
-        // 登录认证并跳转
+        // 7. 点击弹出服务器配置窗口
+        btnOpenServerModal.setOnClickListener {
+            showServerSettingsDialog(tvCurrentServerDisplay)
+        }
+
+        // 8. 仿 QQ 极简登录认证
         btnLogin.setOnClickListener {
-            val serverUrl = cleanUrl(etServerUrl.text.toString().trim())
+            val serverUrl = prefs.getString(KEY_SERVER_URL, DEFAULT_REMOTE) ?: DEFAULT_REMOTE
             val email = etEmail.text.toString().trim()
             val password = etPassword.text.toString().trim()
 
-            if (serverUrl.isEmpty() || email.isEmpty() || password.isEmpty()) {
-                Toast.makeText(this, "请填写完整服务器地址、邮箱和密码", Toast.LENGTH_SHORT).show()
+            if (email.isEmpty() || password.isEmpty()) {
+                Toast.makeText(this, "请输入账号与密码", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
-            saveServerUrl(serverUrl)
             btnLogin.isEnabled = false
-            btnLogin.text = "正在验证登录..."
+            btnLogin.text = "正在安全登录..."
 
             lifecycleScope.launch {
                 try {
@@ -150,7 +142,7 @@ class MainActivity : AppCompatActivity() {
                             put("email", email)
                             put("password", password)
                         })
-                        put("device", "violet_android_client")
+                        put("device", "violet_mobile_client")
                     }
 
                     val mediaType = "application/json; charset=utf-8".toMediaType()
@@ -170,7 +162,7 @@ class MainActivity : AppCompatActivity() {
                         val name = userObj.getString("name")
                         val isAdmin = userObj.optBoolean("is_admin", false)
 
-                        // 持久化 Token
+                        // 永久安全保存凭证
                         prefs.edit()
                             .putString(KEY_TOKEN, token)
                             .putInt(KEY_USER_UID, uid)
@@ -178,18 +170,25 @@ class MainActivity : AppCompatActivity() {
                             .putBoolean(KEY_IS_ADMIN, isAdmin)
                             .apply()
 
-                        Toast.makeText(this@MainActivity, "登录成功，欢迎 $name！", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "登录成功，欢迎 $name！🌸", Toast.LENGTH_SHORT).show()
                         goToHome()
                     } else {
-                        Toast.makeText(this@MainActivity, "登录失败 (HTTP ${response.code}): $body", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@MainActivity, "登录失败 (HTTP ${response.code})", Toast.LENGTH_LONG).show()
                     }
                 } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "连接异常: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "网络或服务异常: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                 } finally {
                     btnLogin.isEnabled = true
-                    btnLogin.text = "登录系统"
+                    btnLogin.text = "登 录"
                 }
             }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (::flowerAnim.isInitialized) {
+            flowerAnim.cancel()
         }
     }
 
@@ -198,11 +197,187 @@ class MainActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun cleanUrl(url: String): String {
-        return url.trim().removeSuffix("/")
+    private fun formatServerDisplay(url: String): String {
+        return url.replace("https://", "").replace("http://", "").removeSuffix("/")
     }
 
-    private fun saveServerUrl(url: String) {
-        prefs.edit().putString(KEY_SERVER_URL, cleanUrl(url)).apply()
+    // 🎨 明暗双主题动态渲染引擎
+    private fun applyTheme(dark: Boolean) {
+        val rootLayout = findViewById<RelativeLayout>(R.id.root_layout)
+        val tvBrandName = findViewById<TextView>(R.id.tv_brand_name)
+        val tvBrandDesc = findViewById<TextView>(R.id.tv_brand_desc)
+        val btnOpenServerModal = findViewById<MaterialCardView>(R.id.btn_open_server_modal)
+
+        val layoutAccount = findViewById<LinearLayout>(R.id.layout_input_account)
+        val layoutPassword = findViewById<LinearLayout>(R.id.layout_input_password)
+        val etEmail = findViewById<EditText>(R.id.et_email)
+        val etPassword = findViewById<EditText>(R.id.et_password)
+
+        val tvThemeIcon = findViewById<TextView>(R.id.tv_theme_icon)
+        val tvThemeText = findViewById<TextView>(R.id.tv_theme_text)
+
+        if (dark) {
+            // 深色星空主题
+            rootLayout.setBackgroundColor(Color.parseColor("#0F172A"))
+            tvBrandName.setTextColor(Color.parseColor("#F8FAFC"))
+            tvBrandDesc.setTextColor(Color.parseColor("#94A3B8"))
+
+            btnOpenServerModal.setCardBackgroundColor(Color.parseColor("#1E293B"))
+            btnOpenServerModal.strokeColor = Color.parseColor("#334155")
+
+            layoutAccount.setBackgroundColor(Color.parseColor("#1E293B"))
+            layoutPassword.setBackgroundColor(Color.parseColor("#1E293B"))
+            etEmail.setTextColor(Color.parseColor("#F8FAFC"))
+            etEmail.setHintTextColor(Color.parseColor("#64748B"))
+            etPassword.setTextColor(Color.parseColor("#F8FAFC"))
+            etPassword.setHintTextColor(Color.parseColor("#64748B"))
+
+            tvThemeIcon.text = "🌙"
+            tvThemeText.text = "暗色模式"
+            tvThemeText.setTextColor(Color.parseColor("#94A3B8"))
+        } else {
+            // 清爽明亮主题
+            rootLayout.setBackgroundColor(Color.parseColor("#F1F5F9"))
+            tvBrandName.setTextColor(Color.parseColor("#0F172A"))
+            tvBrandDesc.setTextColor(Color.parseColor("#64748B"))
+
+            btnOpenServerModal.setCardBackgroundColor(Color.parseColor("#FFFFFF"))
+            btnOpenServerModal.strokeColor = Color.parseColor("#CBD5E1")
+
+            layoutAccount.setBackgroundColor(Color.parseColor("#FFFFFF"))
+            layoutPassword.setBackgroundColor(Color.parseColor("#FFFFFF"))
+            etEmail.setTextColor(Color.parseColor("#0F172A"))
+            etEmail.setHintTextColor(Color.parseColor("#94A3B8"))
+            etPassword.setTextColor(Color.parseColor("#0F172A"))
+            etPassword.setHintTextColor(Color.parseColor("#94A3B8"))
+
+            tvThemeIcon.text = "☀️"
+            tvThemeText.text = "亮色模式"
+            tvThemeText.setTextColor(Color.parseColor("#475569"))
+        }
+    }
+
+    // 🌐 服务器配置窗口 (带历史列表、测试与选择)
+    private fun showServerSettingsDialog(tvDisplayBadge: TextView) {
+        val dialog = Dialog(this)
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_server_settings, null)
+        dialog.setContentView(dialogView)
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        val etNewServer = dialogView.findViewById<EditText>(R.id.et_new_server)
+        val btnAddServer = dialogView.findViewById<Button>(R.id.btn_add_server)
+        val btnClose = dialogView.findViewById<Button>(R.id.btn_dialog_close)
+        val layoutServerList = dialogView.findViewById<LinearLayout>(R.id.layout_server_list)
+
+        // 读取历史服务器列表
+        val historyList = getServerHistory()
+
+        fun refreshList() {
+            layoutServerList.removeAllViews()
+            val currentSelected = prefs.getString(KEY_SERVER_URL, DEFAULT_REMOTE) ?: DEFAULT_REMOTE
+
+            for (serverUrl in historyList) {
+                val itemView = LayoutInflater.from(this).inflate(R.layout.item_server_entry, layoutServerList, false)
+                val tvUrl = itemView.findViewById<TextView>(R.id.tv_entry_url)
+                val tvStatus = itemView.findViewById<TextView>(R.id.tv_entry_status)
+                val btnTest = itemView.findViewById<Button>(R.id.btn_entry_test)
+                val btnSelect = itemView.findViewById<Button>(R.id.btn_entry_select)
+
+                tvUrl.text = serverUrl
+                if (serverUrl == currentSelected) {
+                    tvStatus.text = "🟢 当前使用中"
+                    tvStatus.setTextColor(Color.parseColor("#10B981"))
+                } else {
+                    tvStatus.text = "未测试连通性"
+                    tvStatus.setTextColor(Color.parseColor("#94A3B8"))
+                }
+
+                // 【测试】小按钮
+                btnTest.setOnClickListener {
+                    tvStatus.text = "⚡ 测速中..."
+                    tvStatus.setTextColor(Color.parseColor("#38BDF8"))
+
+                    lifecycleScope.launch {
+                        val start = System.currentTimeMillis()
+                        try {
+                            val req = Request.Builder()
+                                .url("$serverUrl/api/admin/system/organization")
+                                .get()
+                                .build()
+                            val response = withContext(Dispatchers.IO) { client.newCall(req).execute() }
+                            val duration = System.currentTimeMillis() - start
+                            if (response.isSuccessful) {
+                                tvStatus.text = "🟢 连通正常 (${duration}ms)"
+                                tvStatus.setTextColor(Color.parseColor("#10B981"))
+                            } else {
+                                tvStatus.text = "🔴 状态异常 (${response.code})"
+                                tvStatus.setTextColor(Color.parseColor("#EF4444"))
+                            }
+                        } catch (e: Exception) {
+                            tvStatus.text = "🔴 失败: ${e.localizedMessage ?: "超时"}"
+                            tvStatus.setTextColor(Color.parseColor("#EF4444"))
+                        }
+                    }
+                }
+
+                // 【选择】小按钮 -> 立即保存并退出弹窗
+                btnSelect.setOnClickListener {
+                    prefs.edit().putString(KEY_SERVER_URL, serverUrl).apply()
+                    tvDisplayBadge.text = formatServerDisplay(serverUrl)
+                    Toast.makeText(this@MainActivity, "已切换服务器：$serverUrl", Toast.LENGTH_SHORT).show()
+                    dialog.dismiss()
+                }
+
+                layoutServerList.addView(itemView)
+            }
+        }
+
+        refreshList()
+
+        // 添加新服务器
+        btnAddServer.setOnClickListener {
+            val input = etNewServer.text.toString().trim().removeSuffix("/")
+            if (input.isNotEmpty() && (input.startsWith("http://") || input.startsWith("https://"))) {
+                if (!historyList.contains(input)) {
+                    historyList.add(input)
+                    saveServerHistory(historyList)
+                    etNewServer.setText("")
+                    refreshList()
+                    Toast.makeText(this, "已添加至常用列表", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(this, "请输入以 http:// 或 https:// 开头的完整地址", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        btnClose.setOnClickListener { dialog.dismiss() }
+
+        dialog.show()
+    }
+
+    private fun getServerHistory(): MutableList<String> {
+        val jsonStr = prefs.getString(KEY_SERVER_HISTORY, null)
+        val list = mutableListOf<String>()
+        if (!jsonStr.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(jsonStr)
+                for (i in 0 until arr.length()) {
+                    list.add(arr.getString(i))
+                }
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+        if (list.isEmpty()) {
+            list.add(DEFAULT_REMOTE)
+            list.add(DEFAULT_LOCAL)
+        }
+        return list
+    }
+
+    private fun saveServerHistory(list: List<String>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it) }
+        prefs.edit().putString(KEY_SERVER_HISTORY, arr.toString()).apply()
     }
 }
