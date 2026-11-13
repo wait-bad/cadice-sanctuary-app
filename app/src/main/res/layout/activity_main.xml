@@ -139,12 +139,12 @@
                         android:paddingStart="16dp"
                         android:paddingEnd="16dp">
 
-                        <TextView
+                        <ImageView
                             android:id="@+id/icon_account"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="👤"
-                            android:textSize="16sp" />
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:src="@drawable/ic_user"
+                            android:contentDescription="账号图标" />
 
                         <EditText
                             android:id="@+id/et_email"
@@ -182,12 +182,12 @@
                         android:paddingStart="16dp"
                         android:paddingEnd="12dp">
 
-                        <TextView
+                        <ImageView
                             android:id="@+id/icon_password"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="🔒"
-                            android:textSize="16sp" />
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:src="@drawable/ic_lock"
+                            android:contentDescription="密码图标" />
 
                         <EditText
                             android:id="@+id/et_password"
@@ -204,13 +204,14 @@
                             android:paddingEnd="8dp"
                             android:singleLine="true" />
 
-                        <TextView
+                        <ImageView
                             android:id="@+id/btn_toggle_pwd"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="🙈"
-                            android:textSize="15sp"
-                            android:padding="8dp" />
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:padding="8dp"
+                            android:src="@drawable/ic_eye_closed"
+                            android:background="?android:attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="切换密码可见性" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
 

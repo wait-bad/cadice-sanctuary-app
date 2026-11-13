@@ -2,42 +2,43 @@ package com.sanctuary.cadice
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.os.Bundle
-import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
-import java.util.concurrent.TimeUnit
 
 class ChatActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .build()
 
     private var serverUrl: String = ""
     private var token: String = ""
     private var myUid: Int = -1
+    private var myName: String = ""
+    private var isDarkTheme: Boolean = true
 
     private var isGroup: Boolean = true
     private var targetId: Int = -1
     private var targetName: String = ""
 
     private val messageList = mutableListOf<ChatMessage>()
+    private val loadedMids = HashSet<Long>()
     private lateinit var chatAdapter: ChatAdapter
     private lateinit var rvMessages: RecyclerView
 
@@ -49,30 +50,46 @@ class ChatActivity : AppCompatActivity() {
         serverUrl = prefs.getString("server_url", "") ?: ""
         token = prefs.getString("token", "") ?: ""
         myUid = prefs.getInt("user_uid", -1)
+        myName = prefs.getString("user_name", "我") ?: "我"
+        isDarkTheme = prefs.getBoolean("dark_theme", true)
 
         isGroup = intent.getBooleanExtra("is_group", true)
         targetId = intent.getIntExtra("target_id", -1)
         targetName = intent.getStringExtra("target_name") ?: "会话"
 
-        val btnBack = findViewById<Button>(R.id.btn_back)
+        applyTheme()
+
+        val btnBack = findViewById<MaterialButton>(R.id.btn_back)
         btnBack.setOnClickListener { finish() }
 
         val tvTitle = findViewById<TextView>(R.id.tv_chat_title)
         tvTitle.text = targetName
 
         val tvSubtitle = findViewById<TextView>(R.id.tv_chat_subtitle)
-        tvSubtitle.text = if (isGroup) "群组频道 (GID: $targetId)" else "私聊加密会话 (UID: $targetId)"
+        tvSubtitle.text = if (isGroup) {
+            "群组频道 · 实时全双工"
+        } else {
+            val online = SanctuaryCore.isUserOnline(targetId)
+            if (online) "🟢 当前在线 · 私聊会话" else "⚪ 离线 · 私聊会话"
+        }
 
         rvMessages = findViewById(R.id.rv_messages)
         val layoutManager = LinearLayoutManager(this).apply {
             stackFromEnd = true
         }
         rvMessages.layoutManager = layoutManager
-        chatAdapter = ChatAdapter(messageList)
+        chatAdapter = ChatAdapter(
+            context = this,
+            scope = lifecycleScope,
+            messages = messageList,
+            serverUrl = serverUrl,
+            token = token,
+            isDarkTheme = isDarkTheme
+        )
         rvMessages.adapter = chatAdapter
 
         val etMessage = findViewById<EditText>(R.id.et_message)
-        val btnSend = findViewById<Button>(R.id.btn_send)
+        val btnSend = findViewById<MaterialButton>(R.id.btn_send)
 
         btnSend.setOnClickListener {
             val text = etMessage.text.toString().trim()
@@ -81,15 +98,93 @@ class ChatActivity : AppCompatActivity() {
             }
         }
 
-        // 加载历史消息
+        // 加载历史消息并订阅实时新消息
         loadHistory()
+        observeRealtimeMessages()
+    }
+
+    private fun applyTheme() {
+        val chatRoot = findViewById<LinearLayout>(R.id.chat_root)
+        val topBar = findViewById<LinearLayout>(R.id.chat_topbar)
+        val bottomBar = findViewById<LinearLayout>(R.id.chat_bottom_bar)
+        val btnBack = findViewById<MaterialButton>(R.id.btn_back)
+        val tvTitle = findViewById<TextView>(R.id.tv_chat_title)
+        val tvSubtitle = findViewById<TextView>(R.id.tv_chat_subtitle)
+        val cardInput = findViewById<MaterialCardView>(R.id.card_chat_input)
+        val etMessage = findViewById<EditText>(R.id.et_message)
+
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        if (isDarkTheme) {
+            val bg = Color.parseColor("#0F172A")
+            val bar = Color.parseColor("#1E293B")
+            window.statusBarColor = bar
+            window.navigationBarColor = bar
+            insetsController.isAppearanceLightStatusBars = false
+            insetsController.isAppearanceLightNavigationBars = false
+
+            chatRoot.setBackgroundColor(bg)
+            topBar.setBackgroundColor(bar)
+            bottomBar.setBackgroundColor(bar)
+            btnBack.setTextColor(Color.parseColor("#F8FAFC"))
+            tvTitle.setTextColor(Color.parseColor("#F8FAFC"))
+            tvSubtitle.setTextColor(Color.parseColor("#94A3B8"))
+            cardInput.setCardBackgroundColor(bg)
+            cardInput.strokeColor = Color.parseColor("#334155")
+            etMessage.setTextColor(Color.parseColor("#F8FAFC"))
+            etMessage.setHintTextColor(Color.parseColor("#64748B"))
+        } else {
+            val bg = Color.parseColor("#F8FAFC")
+            val bar = Color.parseColor("#FFFFFF")
+            window.statusBarColor = bar
+            window.navigationBarColor = bar
+            insetsController.isAppearanceLightStatusBars = true
+            insetsController.isAppearanceLightNavigationBars = true
+
+            chatRoot.setBackgroundColor(bg)
+            topBar.setBackgroundColor(bar)
+            bottomBar.setBackgroundColor(bar)
+            btnBack.setTextColor(Color.parseColor("#0F172A"))
+            tvTitle.setTextColor(Color.parseColor("#0F172A"))
+            tvSubtitle.setTextColor(Color.parseColor("#64748B"))
+            cardInput.setCardBackgroundColor(bg)
+            cardInput.strokeColor = Color.parseColor("#E2E8F0")
+            etMessage.setTextColor(Color.parseColor("#0F172A"))
+            etMessage.setHintTextColor(Color.parseColor("#94A3B8"))
+        }
+    }
+
+    private fun observeRealtimeMessages() {
+        lifecycleScope.launch {
+            SanctuaryCore.incomingMessages.collect { event ->
+                if (event.isGroup == isGroup && event.targetId == targetId) {
+                    if (loadedMids.add(event.mid)) {
+                        val isSelf = (event.fromUid == myUid)
+                        val senderName = if (isSelf) myName else SanctuaryCore.getDisplayName(event.fromUid)
+                        messageList.add(
+                            ChatMessage(
+                                mid = event.mid,
+                                fromUid = event.fromUid,
+                                fromName = senderName,
+                                fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(event.fromUid),
+                                content = event.content,
+                                createdAt = event.createdAt,
+                                isSelf = isSelf,
+                                contentType = event.contentType
+                            )
+                        )
+                        chatAdapter.notifyItemInserted(messageList.size - 1)
+                        rvMessages.scrollToPosition(messageList.size - 1)
+                    }
+                }
+            }
+        }
     }
 
     private fun loadHistory() {
         val path = if (isGroup) {
-            "$serverUrl/api/group/$targetId/history?limit=40"
+            "$serverUrl/api/group/$targetId/history?limit=50"
         } else {
-            "$serverUrl/api/user/$targetId/history?limit=40"
+            "$serverUrl/api/user/$targetId/history?limit=50"
         }
 
         lifecycleScope.launch {
@@ -100,31 +195,41 @@ class ChatActivity : AppCompatActivity() {
                     .get()
                     .build()
 
-                val res = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-                val body = res.body?.string().orEmpty()
+                val (isSuccess, body) = withContext(Dispatchers.IO) {
+                    SanctuaryCore.httpClient.newCall(req).execute().use { res ->
+                        Pair(res.isSuccessful, res.body?.string().orEmpty())
+                    }
+                }
 
-                if (res.isSuccessful && body.isNotEmpty()) {
+                if (isSuccess && body.startsWith("[")) {
                     val arr = JSONArray(body)
                     messageList.clear()
+                    loadedMids.clear()
 
                     for (i in 0 until arr.length()) {
                         val obj = arr.getJSONObject(i)
-                        val mid = obj.getLong("mid")
-                        val fromUid = obj.getInt("from_uid")
-                        val createdAt = obj.optLong("created_at", System.currentTimeMillis())
+                        val mid = obj.optLong("mid", -1L)
+                        val fromUid = obj.optInt("from_uid", -1)
+                        val createdAt = SanctuaryCore.normalizeTimestampMs(
+                            obj.optLong("created_at", System.currentTimeMillis())
+                        )
                         val detail = obj.optJSONObject("detail")
-                        val content = detail?.optString("content", "") ?: ""
+                        val contentType = detail?.optString("content_type", "text/plain") ?: "text/plain"
+                        val content = SanctuaryCore.parseMessagePreview(detail)
 
-                        if (content.isNotEmpty()) {
-                            val senderName = if (fromUid == myUid) "我" else "用户 $fromUid"
+                        if (mid != -1L && content.isNotEmpty() && loadedMids.add(mid)) {
+                            val isSelf = (fromUid == myUid)
+                            val senderName = if (isSelf) myName else SanctuaryCore.getDisplayName(fromUid)
                             messageList.add(
                                 ChatMessage(
                                     mid = mid,
                                     fromUid = fromUid,
                                     fromName = senderName,
+                                    fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(fromUid),
                                     content = content,
                                     createdAt = createdAt,
-                                    isSelf = (fromUid == myUid)
+                                    isSelf = isSelf,
+                                    contentType = contentType
                                 )
                             )
                         }
@@ -141,7 +246,7 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendMessage(text: String, etMessage: EditText, btnSend: Button) {
+    private fun sendMessage(text: String, etMessage: EditText, btnSend: MaterialButton) {
         val sendUrl = if (isGroup) {
             "$serverUrl/api/group/$targetId/send"
         } else {
@@ -159,26 +264,32 @@ class ChatActivity : AppCompatActivity() {
                     .post(text.toRequestBody(mediaType))
                     .build()
 
-                val res = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-                if (res.isSuccessful) {
-                    val midStr = res.body?.string()?.trim().orEmpty()
-                    val newMid = midStr.toLongOrNull() ?: System.currentTimeMillis()
+                val (isSuccess, code, midStr) = withContext(Dispatchers.IO) {
+                    SanctuaryCore.httpClient.newCall(req).execute().use { res ->
+                        Triple(res.isSuccessful, res.code, res.body?.string()?.trim().orEmpty())
+                    }
+                }
 
-                    messageList.add(
-                        ChatMessage(
-                            mid = newMid,
-                            fromUid = myUid,
-                            fromName = "我",
-                            content = text,
-                            createdAt = System.currentTimeMillis(),
-                            isSelf = true
+                if (isSuccess) {
+                    val newMid = midStr.toLongOrNull() ?: System.currentTimeMillis()
+                    if (loadedMids.add(newMid)) {
+                        messageList.add(
+                            ChatMessage(
+                                mid = newMid,
+                                fromUid = myUid,
+                                fromName = myName,
+                                fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(myUid),
+                                content = text,
+                                createdAt = System.currentTimeMillis(),
+                                isSelf = true
+                            )
                         )
-                    )
-                    chatAdapter.notifyItemInserted(messageList.size - 1)
-                    rvMessages.scrollToPosition(messageList.size - 1)
+                        chatAdapter.notifyItemInserted(messageList.size - 1)
+                        rvMessages.scrollToPosition(messageList.size - 1)
+                    }
                     etMessage.setText("")
                 } else {
-                    Toast.makeText(this@ChatActivity, "发送失败 (HTTP ${res.code})", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ChatActivity, "发送失败 (HTTP $code)", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Toast.makeText(this@ChatActivity, "发送异常: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()

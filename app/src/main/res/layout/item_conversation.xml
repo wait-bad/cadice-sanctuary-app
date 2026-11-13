@@ -1,25 +1,69 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/item_conv_root"
     android:layout_width="match_parent"
-    android:layout_height="72dp"
+    android:layout_height="74dp"
     android:orientation="horizontal"
     android:gravity="center_vertical"
     android:background="?android:attr/selectableItemBackground"
     android:paddingStart="16dp"
     android:paddingEnd="16dp">
 
-    <!-- 头像/图标 -->
-    <TextView
-        android:id="@+id/tv_avatar"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="#334155"
-        android:gravity="center"
-        android:textColor="#F8FAFC"
-        android:textSize="18sp"
-        android:textStyle="bold" />
+    <!-- 圆形头像 + 在线状态小绿点 -->
+    <FrameLayout
+        android:layout_width="50dp"
+        android:layout_height="50dp">
 
-    <!-- 标题与最后一条消息 -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/card_avatar"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center"
+            app:cardBackgroundColor="#334155"
+            app:cardCornerRadius="24dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp">
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent">
+
+                <TextView
+                    android:id="@+id/tv_avatar"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:textColor="#F8FAFC"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <ImageView
+                    android:id="@+id/iv_avatar"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone"
+                    android:contentDescription="头像" />
+            </FrameLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/view_online_dot"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="1dp"
+            android:layout_marginBottom="1dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="#10B981"
+            app:cardCornerRadius="6dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#0F172A"
+            app:strokeWidth="2dp" />
+    </FrameLayout>
+
+    <!-- 标题、时间、摘要与未读角标 -->
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
@@ -30,7 +74,8 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
             <TextView
                 android:id="@+id/tv_name"
@@ -40,28 +85,80 @@
                 android:textColor="#F1F5F9"
                 android:textSize="15sp"
                 android:textStyle="bold"
+                android:ellipsize="end"
                 android:singleLine="true" />
 
-            <TextView
-                android:id="@+id/tv_badge"
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:background="#1E293B"
-                android:textColor="#94A3B8"
-                android:textSize="10sp"
-                android:paddingStart="6dp"
-                android:paddingEnd="6dp"
-                android:paddingTop="2dp"
-                android:paddingBottom="2dp" />
+                android:layout_marginStart="6dp"
+                app:cardBackgroundColor="#1E293B"
+                app:cardCornerRadius="6dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="0dp">
+
+                <TextView
+                    android:id="@+id/tv_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="#94A3B8"
+                    android:textSize="10sp"
+                    android:paddingStart="6dp"
+                    android:paddingEnd="6dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp" />
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:id="@+id/tv_time"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textColor="#64748B"
+                android:textSize="11sp" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/tv_last_msg"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#94A3B8"
-            android:textSize="13sp"
-            android:layout_marginTop="4dp"
-            android:singleLine="true" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="4dp">
+
+            <TextView
+                android:id="@+id/tv_last_msg"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#94A3B8"
+                android:textSize="13sp"
+                android:ellipsize="end"
+                android:singleLine="true" />
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_unread"
+                android:layout_width="wrap_content"
+                android:layout_height="18dp"
+                android:layout_marginStart="8dp"
+                android:visibility="gone"
+                app:cardBackgroundColor="#EF4444"
+                app:cardCornerRadius="9dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="0dp">
+
+                <TextView
+                    android:id="@+id/tv_unread"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:minWidth="18dp"
+                    android:gravity="center"
+                    android:paddingStart="5dp"
+                    android:paddingEnd="5dp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+            </com.google.android.material.card.MaterialCardView>
+        </LinearLayout>
     </LinearLayout>
 </LinearLayout>

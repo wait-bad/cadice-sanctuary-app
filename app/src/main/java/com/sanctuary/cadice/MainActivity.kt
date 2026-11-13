@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
 
         val etEmail = findViewById<EditText>(R.id.et_email)
         val etPassword = findViewById<EditText>(R.id.et_password)
-        val btnTogglePwd = findViewById<TextView>(R.id.btn_toggle_pwd)
+        val btnTogglePwd = findViewById<ImageView>(R.id.btn_toggle_pwd)
         val btnLogin = findViewById<MaterialButton>(R.id.btn_login)
 
         val btnToggleTheme = findViewById<MaterialCardView>(R.id.btn_toggle_theme)
@@ -106,15 +106,15 @@ class MainActivity : AppCompatActivity() {
             applyTheme(isDarkTheme)
         }
 
-        // 6. 密码明文/密文切换 (🙈 / 👁️)
+        // 6. 密码明文/密文切换 (极简矢量眼睛图标)
         btnTogglePwd.setOnClickListener {
             isPasswordVisible = !isPasswordVisible
             if (isPasswordVisible) {
                 etPassword.transformationMethod = HideReturnsTransformationMethod.getInstance()
-                btnTogglePwd.text = "👁️"
+                btnTogglePwd.setImageResource(R.drawable.ic_eye_open)
             } else {
                 etPassword.transformationMethod = PasswordTransformationMethod.getInstance()
-                btnTogglePwd.text = "🙈"
+                btnTogglePwd.setImageResource(R.drawable.ic_eye_closed)
             }
             etPassword.setSelection(etPassword.text.length)
         }
@@ -220,6 +220,9 @@ class MainActivity : AppCompatActivity() {
         val layoutPassword = findViewById<MaterialCardView>(R.id.layout_input_password)
         val etEmail = findViewById<EditText>(R.id.et_email)
         val etPassword = findViewById<EditText>(R.id.et_password)
+        val iconAccount = findViewById<ImageView>(R.id.icon_account)
+        val iconPassword = findViewById<ImageView>(R.id.icon_password)
+        val btnTogglePwd = findViewById<ImageView>(R.id.btn_toggle_pwd)
 
         val btnToggleTheme = findViewById<MaterialCardView>(R.id.btn_toggle_theme)
         val tvThemeIcon = findViewById<TextView>(R.id.tv_theme_icon)
@@ -255,7 +258,10 @@ class MainActivity : AppCompatActivity() {
             etEmail.setHintTextColor(Color.parseColor("#64748B"))
             etPassword.setTextColor(Color.parseColor("#F8FAFC"))
             etPassword.setHintTextColor(Color.parseColor("#64748B"))
-
+            val iconTint = ColorStateList.valueOf(Color.parseColor("#94A3B8"))
+            iconAccount.imageTintList = iconTint
+            iconPassword.imageTintList = iconTint
+            btnTogglePwd.imageTintList = iconTint
             btnToggleTheme.setCardBackgroundColor(cardColor)
             btnToggleTheme.strokeColor = strokeColor
             tvThemeIcon.text = "🌙"
@@ -289,7 +295,10 @@ class MainActivity : AppCompatActivity() {
             etEmail.setHintTextColor(Color.parseColor("#94A3B8"))
             etPassword.setTextColor(Color.parseColor("#0F172A"))
             etPassword.setHintTextColor(Color.parseColor("#94A3B8"))
-
+            val iconTint = ColorStateList.valueOf(Color.parseColor("#64748B"))
+            iconAccount.imageTintList = iconTint
+            iconPassword.imageTintList = iconTint
+            btnTogglePwd.imageTintList = iconTint
             btnToggleTheme.setCardBackgroundColor(cardColor)
             btnToggleTheme.strokeColor = strokeColor
             tvThemeIcon.text = "☀️"
