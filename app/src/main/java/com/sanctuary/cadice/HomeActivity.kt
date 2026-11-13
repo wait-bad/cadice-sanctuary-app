@@ -41,6 +41,7 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var conversationAdapter: ConversationAdapter
     private lateinit var contactAdapter: ConversationAdapter
     private lateinit var refreshChats: FlowerPullRefreshLayout
+    private lateinit var refreshContacts: FlowerPullRefreshLayout
     private lateinit var refreshMoments: FlowerPullRefreshLayout
 
     private var activeIsGroup: Boolean? = null
