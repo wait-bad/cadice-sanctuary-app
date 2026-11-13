@@ -1,99 +1,140 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/dialog_server_root"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:background="#1E293B"
-    android:padding="20dp">
+    app:cardBackgroundColor="#1E293B"
+    app:cardCornerRadius="24dp"
+    app:cardElevation="12dp"
+    app:strokeColor="#334155"
+    app:strokeWidth="1dp">
 
-    <!-- 弹窗标题栏 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginBottom="14dp">
+        android:orientation="vertical"
+        android:padding="22dp">
+
+        <!-- 弹窗标题栏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:id="@+id/tv_dialog_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="🌐 服务器节点"
+                android:textColor="#F8FAFC"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_dialog_close"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                android:text="✕"
+                android:textColor="#94A3B8"
+                android:textSize="15sp"
+                app:cornerRadius="17dp" />
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/tv_dialog_title"
-            android:layout_width="0dp"
+            android:id="@+id/tv_dialog_desc"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="🌐 服务器连接配置"
-            android:textColor="#F8FAFC"
-            android:textSize="17sp"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/btn_dialog_close"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:text="关闭"
+            android:text="选择常用节点或新增你的 VoceChat 服务器地址"
             android:textColor="#94A3B8"
-            android:textSize="13sp" />
+            android:textSize="12sp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- 添加新服务器圆角输入框 + 胶囊按钮 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="18dp">
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_new_server_input"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                app:cardBackgroundColor="#0F172A"
+                app:cardCornerRadius="14dp"
+                app:cardElevation="0dp"
+                app:strokeColor="#334155"
+                app:strokeWidth="1dp">
+
+                <EditText
+                    android:id="@+id/et_new_server"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@null"
+                    android:textColor="#F8FAFC"
+                    android:textColorHint="#64748B"
+                    android:hint="https:// 或 http://..."
+                    android:inputType="textUri"
+                    android:textSize="13sp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:singleLine="true" />
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_add_server"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_marginStart="8dp"
+                android:minWidth="64dp"
+                android:minHeight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:backgroundTint="#7C3AED"
+                android:text="添加"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                app:cornerRadius="14dp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tv_history_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="可用节点列表"
+            android:textColor="#64748B"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.04"
+            android:layout_marginBottom="10dp" />
+
+        <!-- 可滚动的历史服务器列表 -->
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/layout_server_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/tv_dialog_desc"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="选择已有服务器或输入新的 VoceChat 节点地址："
-        android:textColor="#94A3B8"
-        android:textSize="12sp"
-        android:layout_marginBottom="12dp" />
-
-    <!-- 添加新服务器输入框与按钮 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginBottom="16dp">
-
-        <EditText
-            android:id="@+id/et_new_server"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="#0F172A"
-            android:textColor="#F8FAFC"
-            android:textColorHint="#64748B"
-            android:hint="https:// 或 http://"
-            android:textSize="13sp"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:singleLine="true" />
-
-        <Button
-            android:id="@+id/btn_add_server"
-            android:layout_width="wrap_content"
-            android:layout_height="match_parent"
-            android:layout_marginStart="8dp"
-            android:backgroundTint="#7C3AED"
-            android:text="添加"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/tv_history_label"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="常用与历史服务器列表："
-        android:textColor="#64748B"
-        android:textSize="11sp"
-        android:layout_marginBottom="8dp" />
-
-    <!-- 动态历史服务器列表容器 -->
-    <LinearLayout
-        android:id="@+id/layout_server_list"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical" />
-
-</LinearLayout>
+</com.google.android.material.card.MaterialCardView>

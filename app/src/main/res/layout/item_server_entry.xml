@@ -1,66 +1,90 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/item_server_root"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:background="#0F172A"
-    android:paddingStart="12dp"
-    android:paddingEnd="10dp"
-    android:paddingTop="10dp"
-    android:paddingBottom="10dp"
-    android:layout_marginBottom="8dp">
+    android:layout_marginBottom="10dp"
+    app:cardBackgroundColor="#0F172A"
+    app:cardCornerRadius="16dp"
+    app:cardElevation="0dp"
+    app:strokeColor="#334155"
+    app:strokeWidth="1dp">
 
-    <!-- 服务器地址与测速结果 -->
     <LinearLayout
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:orientation="vertical">
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="14dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp">
 
-        <TextView
-            android:id="@+id/tv_entry_url"
-            android:layout_width="match_parent"
+        <!-- 服务器地址与测速结果 -->
+        <LinearLayout
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:textColor="#F1F5F9"
-            android:textSize="13sp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tv_entry_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#F1F5F9"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:ellipsize="middle"
+                android:singleLine="true" />
+
+            <TextView
+                android:id="@+id/tv_entry_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#94A3B8"
+                android:textSize="11sp"
+                android:layout_marginTop="3dp"
+                android:text="点击测速检查连通性" />
+        </LinearLayout>
+
+        <!-- 紧凑现代小胶囊按钮 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_entry_test"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:minWidth="50dp"
+            android:minHeight="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:text="测速"
+            android:textSize="11sp"
+            android:textColor="#38BDF8"
+            app:cornerRadius="10dp"
+            app:strokeColor="#0284C7"
+            app:strokeWidth="1dp"
+            android:layout_marginStart="8dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_entry_select"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:minWidth="50dp"
+            android:minHeight="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:backgroundTint="#7C3AED"
+            android:text="使用"
+            android:textSize="11sp"
             android:textStyle="bold"
-            android:singleLine="true" />
+            android:textColor="#FFFFFF"
+            app:cornerRadius="10dp"
+            android:layout_marginStart="6dp" />
 
-        <TextView
-            android:id="@+id/tv_entry_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textColor="#94A3B8"
-            android:textSize="10sp"
-            android:layout_marginTop="2dp"
-            android:text="未测试连通性" />
     </LinearLayout>
-
-    <!-- 两个紧凑小按钮 -->
-    <Button
-        android:id="@+id/btn_entry_test"
-        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-        android:layout_width="54dp"
-        android:layout_height="34dp"
-        android:text="测试"
-        android:textSize="11sp"
-        android:textColor="#38BDF8"
-        app:strokeColor="#0284C7"
-        android:padding="0dp"
-        android:layout_marginStart="6dp" />
-
-    <Button
-        android:id="@+id/btn_entry_select"
-        android:layout_width="54dp"
-        android:layout_height="34dp"
-        android:backgroundTint="#7C3AED"
-        android:text="选择"
-        android:textSize="11sp"
-        android:textColor="#FFFFFF"
-        android:padding="0dp"
-        android:layout_marginStart="6dp" />
-
-</LinearLayout>
+</com.google.android.material.card.MaterialCardView>

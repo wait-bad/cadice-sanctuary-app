@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_layout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#0F172A">
 
-    <!-- 主滚动内容 -->
+    <!-- 主滚动内容：将底部主题切换纳入滚动流 + weight 弹性占位，彻底防止键盘弹出顶乱布局 -->
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -21,7 +21,7 @@
             android:paddingStart="32dp"
             android:paddingEnd="32dp"
             android:paddingTop="56dp"
-            android:paddingBottom="72dp">
+            android:paddingBottom="20dp">
 
             <!-- 🌸 可黛丝旋转小花 Logo -->
             <FrameLayout
@@ -113,94 +113,115 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- 仿 QQ 极简现代输入窗 -->
+            <!-- 仿 QQ 极简现代输入窗（圆角卡片 + 轻描边） -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
 
-                <!-- 账号输入胶囊条 -->
-                <LinearLayout
+                <!-- 账号输入圆角卡片 -->
+                <com.google.android.material.card.MaterialCardView
                     android:id="@+id/layout_input_account"
                     android:layout_width="match_parent"
-                    android:layout_height="52dp"
-                    android:background="#1E293B"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingStart="16dp"
-                    android:paddingEnd="16dp"
-                    android:layout_marginBottom="14dp">
+                    android:layout_height="54dp"
+                    android:layout_marginBottom="14dp"
+                    app:cardBackgroundColor="#1E293B"
+                    app:cardCornerRadius="16dp"
+                    app:cardElevation="0dp"
+                    app:strokeColor="#334155"
+                    app:strokeWidth="1dp">
 
-                    <TextView
-                        android:id="@+id/icon_account"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="👤"
-                        android:textSize="16sp" />
-
-                    <EditText
-                        android:id="@+id/et_email"
-                        android:layout_width="0dp"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="match_parent"
-                        android:layout_weight="1"
-                        android:background="@null"
-                        android:textColor="#F8FAFC"
-                        android:textColorHint="#64748B"
-                        android:hint="邮箱 / 用户名"
-                        android:textSize="14sp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:singleLine="true" />
-                </LinearLayout>
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp">
 
-                <!-- 密码输入胶囊条 -->
-                <LinearLayout
+                        <TextView
+                            android:id="@+id/icon_account"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="👤"
+                            android:textSize="16sp" />
+
+                        <EditText
+                            android:id="@+id/et_email"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@null"
+                            android:inputType="textEmailAddress"
+                            android:textColor="#F8FAFC"
+                            android:textColorHint="#64748B"
+                            android:hint="邮箱 / 用户名"
+                            android:textSize="14sp"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="12dp"
+                            android:singleLine="true" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- 密码输入圆角卡片 -->
+                <com.google.android.material.card.MaterialCardView
                     android:id="@+id/layout_input_password"
                     android:layout_width="match_parent"
-                    android:layout_height="52dp"
-                    android:background="#1E293B"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingStart="16dp"
-                    android:paddingEnd="16dp">
+                    android:layout_height="54dp"
+                    app:cardBackgroundColor="#1E293B"
+                    app:cardCornerRadius="16dp"
+                    app:cardElevation="0dp"
+                    app:strokeColor="#334155"
+                    app:strokeWidth="1dp">
 
-                    <TextView
-                        android:id="@+id/icon_password"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="🔒"
-                        android:textSize="16sp" />
-
-                    <EditText
-                        android:id="@+id/et_password"
-                        android:layout_width="0dp"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="match_parent"
-                        android:layout_weight="1"
-                        android:background="@null"
-                        android:textColor="#F8FAFC"
-                        android:textColorHint="#64748B"
-                        android:hint="登录密码"
-                        android:inputType="textPassword"
-                        android:textSize="14sp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:singleLine="true" />
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="12dp">
 
-                    <TextView
-                        android:id="@+id/btn_toggle_pwd"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="👁️"
-                        android:textSize="14sp"
-                        android:padding="6dp" />
-                </LinearLayout>
+                        <TextView
+                            android:id="@+id/icon_password"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="🔒"
+                            android:textSize="16sp" />
+
+                        <EditText
+                            android:id="@+id/et_password"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@null"
+                            android:textColor="#F8FAFC"
+                            android:textColorHint="#64748B"
+                            android:hint="登录密码"
+                            android:inputType="textPassword"
+                            android:textSize="14sp"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="8dp"
+                            android:singleLine="true" />
+
+                        <TextView
+                            android:id="@+id/btn_toggle_pwd"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="🙈"
+                            android:textSize="15sp"
+                            android:padding="8dp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
 
                 <!-- 登录主按键（仿 QQ 高级圆角胶囊按键） -->
-                <Button
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/btn_login"
                     android:layout_width="match_parent"
                     android:layout_height="52dp"
-                    android:layout_marginTop="28dp"
+                    android:layout_marginTop="26dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
                     android:backgroundTint="#7C3AED"
                     android:text="登 录"
                     android:textColor="#FFFFFF"
@@ -211,39 +232,61 @@
 
             </LinearLayout>
 
+            <!-- 弹性留白：平时把底部模式切换自然撑到左下角；键盘弹出时收缩为最小间距，绝不遮挡按钮 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:minHeight="28dp" />
+
+            <!-- 底部模式切换胶囊（跟随滚动画布，不悬浮遮挡） -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="start|center_vertical">
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/btn_toggle_theme"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    app:cardBackgroundColor="#1E293B"
+                    app:cardCornerRadius="18dp"
+                    app:cardElevation="0dp"
+                    app:strokeColor="#334155"
+                    app:strokeWidth="1dp"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:foreground="?android:attr/selectableItemBackground">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="14dp">
+
+                        <TextView
+                            android:id="@+id/tv_theme_icon"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="🌙"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:id="@+id/tv_theme_text"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="暗色模式"
+                            android:textColor="#94A3B8"
+                            android:textSize="12sp"
+                            android:layout_marginStart="6dp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 
-    <!-- 底部常驻栏：左下角明暗主题切换标志 -->
-    <LinearLayout
-        android:id="@+id/btn_toggle_theme"
-        android:layout_width="wrap_content"
-        android:layout_height="40dp"
-        android:layout_alignParentBottom="true"
-        android:layout_alignParentStart="true"
-        android:layout_marginStart="20dp"
-        android:layout_marginBottom="16dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:background="?android:attr/selectableItemBackground">
-
-        <TextView
-            android:id="@+id/tv_theme_icon"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="🌙"
-            android:textSize="16sp" />
-
-        <TextView
-            android:id="@+id/tv_theme_text"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="暗色模式"
-            android:textColor="#94A3B8"
-            android:textSize="12sp"
-            android:layout_marginStart="6dp" />
-    </LinearLayout>
-
-</RelativeLayout>
+</FrameLayout>
