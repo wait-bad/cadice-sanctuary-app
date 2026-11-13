@@ -54,6 +54,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
                                     fromUid = myUid,
                                     fromName = myName,
                                     fromAvatarUpdatedAt = SanctuaryCore.getAvatarUpdatedAt(myUid),
+                                    content = replyText,
                                     createdAt = System.currentTimeMillis(),
                                     isSelf = true,
                                     syncStatus = ChatMessage.STATUS_SENT
