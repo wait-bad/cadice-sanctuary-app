@@ -14,8 +14,7 @@ class SanctuaryDb private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "violet_sanctuary.db"
-        private const val DB_VERSION = 3
-
+        private const val DB_VERSION = 4
         private const val TABLE_MESSAGES = "messages"
         private const val TABLE_CONVERSATIONS = "conversations"
         private const val TABLE_DRAFTS = "drafts"
@@ -49,6 +48,7 @@ class SanctuaryDb private constructor(context: Context) :
                 reply_to_mid INTEGER NOT NULL DEFAULT 0,
                 reply_preview TEXT NOT NULL DEFAULT '',
                 file_path TEXT NOT NULL DEFAULT '',
+                local_file_uri TEXT NOT NULL DEFAULT '',
                 image_w INTEGER NOT NULL DEFAULT 0,
                 image_h INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (account_key, is_group, target_id, mid)
@@ -109,6 +109,9 @@ class SanctuaryDb private constructor(context: Context) :
             runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN image_w INTEGER NOT NULL DEFAULT 0") }
             runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN image_h INTEGER NOT NULL DEFAULT 0") }
         }
+        if (oldVersion < 4) {
+            runCatching { db.execSQL("ALTER TABLE $TABLE_MESSAGES ADD COLUMN local_file_uri TEXT NOT NULL DEFAULT ''") }
+        }
     }
 
     fun accountKey(serverUrl: String, myUid: Int): String {
@@ -149,6 +152,7 @@ class SanctuaryDb private constructor(context: Context) :
                 cv.put("reply_to_mid", m.replyToMid)
                 cv.put("reply_preview", m.replyPreview)
                 cv.put("file_path", m.filePath)
+                cv.put("local_file_uri", m.localFileUri)
                 cv.put("image_w", m.imageWidth)
                 cv.put("image_h", m.imageHeight)
                 db.insertWithOnConflict(TABLE_MESSAGES, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
@@ -204,6 +208,7 @@ class SanctuaryDb private constructor(context: Context) :
                 put("reply_to_mid", realMsg.replyToMid)
                 put("reply_preview", realMsg.replyPreview)
                 put("file_path", realMsg.filePath)
+                put("local_file_uri", realMsg.localFileUri)
                 put("image_w", realMsg.imageWidth)
                 put("image_h", realMsg.imageHeight)
             }
@@ -272,7 +277,7 @@ class SanctuaryDb private constructor(context: Context) :
         readableDatabase.rawQuery(
             """
             SELECT mid, from_uid, from_name, from_avatar_ts, content, created_at, content_type,
-                   sync_status, local_id, reply_to_mid, reply_preview, file_path, image_w, image_h
+                   sync_status, local_id, reply_to_mid, reply_preview, file_path, image_w, image_h, local_file_uri
             FROM $TABLE_MESSAGES
             WHERE account_key = ? AND is_group = ? AND target_id = ? AND mid < ?
             ORDER BY mid DESC
@@ -308,6 +313,7 @@ class SanctuaryDb private constructor(context: Context) :
                         replyToMid = c.getLong(9),
                         replyPreview = c.getString(10),
                         filePath = c.getString(11),
+                        localFileUri = c.getString(14),
                         imageWidth = c.getInt(12),
                         imageHeight = c.getInt(13)
                     )

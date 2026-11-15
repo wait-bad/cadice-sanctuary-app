@@ -81,6 +81,21 @@ object SanctuaryCore {
         }
         .build()
 
+    // 媒体上传/下载专用长超时客户端，避免大图通过 Cloudflare 隧道时触发 14s callTimeout 截断
+    private val mediaClient: OkHttpClient = OkHttpClient.Builder()
+        .dispatcher(sharedDispatcher)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .writeTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            val req = chain.request().newBuilder()
+                .header("User-Agent", "VioletIM/1.7 (Android; Mobile)")
+                .build()
+            chain.proceed(req)
+        }
+        .build()
+
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -467,8 +482,21 @@ object SanctuaryCore {
         val mutex = getConversationMutex(isGroup, targetId)
         return mutex.withLock {
             try {
-                val filePath = uploadImageFile(context.applicationContext, serverUrl, compressed.bytes, compressed.fileName)
-                    ?: return@withLock SendResult(success = false, error = "图片分片上传失败")
+                val (filePath, uploadErr) = uploadImageFile(
+                    context.applicationContext, serverUrl, compressed.bytes, compressed.fileName
+                )
+                if (filePath.isNullOrBlank()) {
+                    return@withLock SendResult(success = false, error = uploadErr.ifBlank { "图片分片上传失败" })
+                }
+
+                // 将本地待发图顺手落入 chat_images 磁盘缓存，确保随后切换到 server filePath 时零网络秒出
+                runCatching {
+                    val imgDir = File(context.applicationContext.cacheDir, "chat_images").apply { if (!exists()) mkdirs() }
+                    val diskFile = File(imgDir, filePath.replace("/", "_"))
+                    if (!diskFile.exists() || diskFile.length() == 0L) {
+                        FileOutputStream(diskFile).use { it.write(compressed.bytes) }
+                    }
+                }
 
                 val sendUrl = if (isGroup) {
                     "$serverUrl/api/group/$targetId/send"
@@ -503,35 +531,42 @@ object SanctuaryCore {
         serverUrl: String,
         bytes: ByteArray,
         fileName: String
-    ): String? = withContext(Dispatchers.IO) {
+    ): Pair<String?, String> = withContext(Dispatchers.IO) {
         try {
+            val safeName = fileName
+                .replace(Regex("[^A-Za-z0-9._-]"), "_")
+                .ifBlank { "photo_${System.currentTimeMillis()}.jpg" }
             val prepBody = JSONObject().apply {
                 put("content_type", "image/jpeg")
-                put("filename", fileName)
+                put("filename", safeName)
             }.toString()
-            val (prepCode, prepRes) = executeAuthorized(context) { tk ->
+            val (prepCode, prepRes) = executeAuthorized(context, mediaClient) { tk ->
                 Request.Builder()
                     .url("$serverUrl/api/resource/file/prepare")
                     .header("X-API-Key", tk)
                     .post(prepBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
                     .build()
             }
-            if (prepCode !in 200..299) return@withContext null
+            if (prepCode !in 200..299) {
+                return@withContext Pair(null, "prepare HTTP $prepCode: ${prepRes.take(80)}")
+            }
             val fileId = prepRes.trim().trim('"')
-            if (fileId.isBlank()) return@withContext null
+            if (fileId.isBlank()) {
+                return@withContext Pair(null, "prepare 未返回 file_id")
+            }
 
             val multipart = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("file_id", fileId)
                 .addFormDataPart(
                     "chunk_data",
-                    fileName,
+                    safeName,
                     bytes.toRequestBody("image/jpeg".toMediaType())
                 )
                 .addFormDataPart("chunk_is_last", "true")
                 .build()
 
-            val (upCode, upRes) = executeAuthorized(context) { tk ->
+            val (upCode, upRes) = executeAuthorized(context, mediaClient) { tk ->
                 Request.Builder()
                     .url("$serverUrl/api/resource/file/upload")
                     .header("X-API-Key", tk)
@@ -539,12 +574,13 @@ object SanctuaryCore {
                     .build()
             }
             if (upCode in 200..299 && upRes.startsWith("{")) {
-                JSONObject(upRes).optString("path", "").takeIf { it.isNotBlank() }
+                val path = JSONObject(upRes).optString("path", "").takeIf { it.isNotBlank() }
+                if (path != null) Pair(path, "") else Pair(null, "upload 响应缺少 path")
             } else {
-                null
+                Pair(null, "upload HTTP $upCode: ${upRes.take(80)}")
             }
-        } catch (_: Exception) {
-            null
+        } catch (e: Exception) {
+            Pair(null, e.localizedMessage ?: "上传请求异常")
         }
     }
 
@@ -647,9 +683,9 @@ object SanctuaryCore {
         }
     }
 
-    private suspend fun executeCallCancellable(req: Request): Pair<Int, String> =
+    private suspend fun executeCallCancellable(req: Request, client: OkHttpClient = httpClient): Pair<Int, String> =
         suspendCancellableCoroutine { cont ->
-            val call = httpClient.newCall(req)
+            val call = client.newCall(req)
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -673,14 +709,58 @@ object SanctuaryCore {
             })
         }
 
-    suspend fun executeAuthorized(context: Context, requestBuilder: (token: String) -> Request): Pair<Int, String> {
+    suspend fun executeAuthorized(
+        context: Context,
+        client: OkHttpClient = httpClient,
+        requestBuilder: (token: String) -> Request
+    ): Pair<Int, String> {
         val token1 = ensureValidToken(context, forceRenew = false) ?: return Pair(401, "")
-        val firstAttempt = executeCallCancellable(requestBuilder(token1))
+        val firstAttempt = executeCallCancellable(requestBuilder(token1), client)
         if (firstAttempt.first != 401) {
             return firstAttempt
         }
         val token2 = ensureValidToken(context, forceRenew = true) ?: return Pair(401, "")
-        return executeCallCancellable(requestBuilder(token2))
+        return executeCallCancellable(requestBuilder(token2), client)
+    }
+
+    private suspend fun executeBytesCancellable(req: Request, client: OkHttpClient = mediaClient): Pair<Int, ByteArray?> =
+        suspendCancellableCoroutine { cont ->
+            val call = client.newCall(req)
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) {
+                        cont.resumeWithException(e)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { res ->
+                        val bytes = try {
+                            if (res.isSuccessful) res.body?.bytes() else null
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (cont.isActive) {
+                            cont.resume(Pair(res.code, bytes))
+                        }
+                    }
+                }
+            })
+        }
+
+    private suspend fun executeBytesAuthorized(
+        context: Context,
+        client: OkHttpClient = mediaClient,
+        requestBuilder: (token: String) -> Request
+    ): Pair<Int, ByteArray?> {
+        val token1 = ensureValidToken(context, forceRenew = false) ?: return Pair(401, null)
+        val firstAttempt = executeBytesCancellable(requestBuilder(token1), client)
+        if (firstAttempt.first != 401) {
+            return firstAttempt
+        }
+        val token2 = ensureValidToken(context, forceRenew = true) ?: return Pair(401, null)
+        return executeBytesCancellable(requestBuilder(token2), client)
     }
 
     // ==================== 💾 首页列表快照 ====================
@@ -1013,23 +1093,28 @@ object SanctuaryCore {
         serverUrl: String,
         filePath: String,
         localFileUri: String,
-        imageView: ImageView
+        imageView: ImageView,
+        onResult: ((Boolean) -> Unit)? = null
     ) {
         val cacheKey = if (filePath.isNotBlank()) "img_$filePath" else "local_$localFileUri"
         imageView.tag = cacheKey
 
         chatImageMemoryCache.get(cacheKey)?.let { bmp ->
             imageView.setImageBitmap(bmp)
+            onResult?.invoke(true)
             return
         }
 
         imageView.setImageBitmap(null)
         scope.launch {
             val bmp = fetchOrLoadChatImageBitmap(context.applicationContext, serverUrl, filePath, localFileUri, cacheKey)
-            if (bmp != null) {
-                withContext(Dispatchers.Main) {
-                    if (imageView.tag == cacheKey) {
+            withContext(Dispatchers.Main) {
+                if (imageView.tag == cacheKey) {
+                    if (bmp != null) {
                         imageView.setImageBitmap(bmp)
+                        onResult?.invoke(true)
+                    } else {
+                        onResult?.invoke(false)
                     }
                 }
             }
@@ -1078,25 +1163,21 @@ object SanctuaryCore {
             coreScope.async {
                 chatImageSemaphore.withPermit {
                     try {
-                        val validTk = ensureValidToken(context, forceRenew = false) ?: activeToken
                         val encoded = URLEncoder.encode(filePath, "UTF-8")
                         val url = "$serverUrl/api/resource/file?file_path=$encoded"
-                        val req = Request.Builder()
-                            .url(url)
-                            .header("X-API-Key", validTk)
-                            .get()
-                            .build()
-                        httpClient.newCall(req).execute().use { res ->
-                            if (res.isSuccessful) {
-                                val bytes = res.body?.bytes()
-                                if (bytes != null && bytes.isNotEmpty()) {
-                                    FileOutputStream(diskFile).use { it.write(bytes) }
-                                    val bmp = decodeSampledBitmap(bytes, maxDim, maxDim)
-                                    if (bmp != null) {
-                                        if (maxDim <= 900) chatImageMemoryCache.put(cacheKey, bmp)
-                                        return@withPermit bmp
-                                    }
-                                }
+                        val (code, bytes) = executeBytesAuthorized(context, mediaClient) { tk ->
+                            Request.Builder()
+                                .url(url)
+                                .header("X-API-Key", tk)
+                                .get()
+                                .build()
+                        }
+                        if (code in 200..299 && bytes != null && bytes.isNotEmpty()) {
+                            FileOutputStream(diskFile).use { it.write(bytes) }
+                            val bmp = decodeSampledBitmap(bytes, maxDim, maxDim)
+                            if (bmp != null) {
+                                if (maxDim <= 900) chatImageMemoryCache.put(cacheKey, bmp)
+                                return@withPermit bmp
                             }
                         }
                         null
@@ -1584,13 +1665,17 @@ object SanctuaryCore {
         val rawContent = detail.optString("content", "")
         if (contentType == "vocechat/file") {
             val props = detail.optJSONObject("properties")
-            val mime = props?.optString("content_type", "") ?: ""
-            val fileName = props?.optString("name", "") ?: ""
+            val mime = (props?.optString("content_type", "") ?: "").lowercase()
+            val fileName = (props?.optString("name", "") ?: "").lowercase()
+            val lowerPath = rawContent.lowercase()
+            val isImageExt = listOf(".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic").any { ext ->
+                fileName.endsWith(ext) || lowerPath.endsWith(ext)
+            }
             return when {
-                mime.startsWith("image/") -> "[图片]"
+                mime.startsWith("image/") || isImageExt -> "[图片]"
                 mime.startsWith("audio/") -> "[语音]"
                 mime.startsWith("video/") -> "[视频]"
-                fileName.isNotBlank() -> "[文件] $fileName"
+                fileName.isNotBlank() -> "[文件] ${props?.optString("name", "")}"
                 else -> "[文件]"
             }
         }

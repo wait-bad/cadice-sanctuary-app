@@ -82,6 +82,8 @@ class ImageViewerActivity : AppCompatActivity() {
             )
             if (bmp != null) {
                 displayCenteredBitmap(bmp)
+            } else {
+                android.widget.Toast.makeText(this@ImageViewerActivity, "原图下载失败，请稍后重试", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
     }

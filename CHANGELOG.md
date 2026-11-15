@@ -1,6 +1,22 @@
 # 📜 Violet IM (`cadice-sanctuary-app`) 版本演进与架构改动记录
 
-本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.4` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+本文档完整记录了 `cadice-sanctuary-app`（VoceChat 私有云 Android 原生客户端）从 `v1.5.0` 到最新 `v1.7.5` 的核心缺陷修复、架构重构与新特性清单，便于随时回溯每一项代码变更与设计原因。
+
+---
+
+## 🖼️ v1.7.5（Build 29 · 彻底修复图片发送/重发丢图与下载失败空白问题）
+
+### 🐛 图片管道根因定位与全链路修复
+1. **修复「失败点重发后图片变成纯文本 `[图片]` 丢失」重大 Bug (`ChatActivity.kt`)**
+   - **根因**：此前 `retryFailedMessage` 未区分消息类型，图片上传失败后点击 `❗重发` 会调用 `dispatchSendText`，把兜底预览文案 `"[图片]"` 当成 `text/plain` 纯文本发送给服务器，导致发送方与接收方都只看到 `[图片]` 文字且真实图片彻底丢失。
+   - **修复**：`retryFailedMessage` 识别 `vocechat/file` 消息后自动从本地持久化原图文件重新走 `dispatchSendImage` 上传通道发送；同时 `sendImageOptimistic` 落盘后立刻写入 SQLite，并升级数据库至 `v4` 新增 `local_file_uri` 字段，重启页面也不丢失待发/已发本地原图。
+2. **突破 14s 隧道上传/下载超时并修复大图下载无 401 续期 (`SanctuaryCore.kt` / `MediaHelper.kt`)**
+   - 新增媒体专用 `mediaClient`（60s `callTimeout` / 45s 读写超时），避免照片经过 Cloudflare 隧道时触发 14s 超时截断；
+   - `uploadImageFile` 对 multipart 文件名进行纯 ASCII 安全清洗，并透出真实 HTTP 状态码与服务端报错；上传成功后立即同步写入 `chat_images` 磁盘缓存；
+   - `fetchOrLoadChatImageBitmap` 接入 `executeBytesAuthorized`，解决 Token 5 分钟过期后图片下载报 `401` 静默失败的问题；
+   - `MediaHelper.compressAndStripExif` 将 EXIF 读取改为独立容错降级，防止非标准图片流抛异常中断发送。
+3. **聊天气泡图片加载中/失败可点击重试反馈 (`Adapters.kt` / `item_message_*.xml` / `ImageViewerActivity.kt`)**
+   - 为左右气泡内嵌图片增加 `🖼️ 图片加载中...` 与 `🖼️ 加载失败 / 点击重试` 状态视图，彻底告别空白占位；兼容识别各类大小写 MIME 与图片扩展名。
 
 ---
 

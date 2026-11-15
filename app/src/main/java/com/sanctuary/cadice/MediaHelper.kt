@@ -37,12 +37,15 @@ object MediaHelper {
             val resolver = context.contentResolver
 
             // 1. 先读取 EXIF 方向角（必须在二次压缩前从原流获取）
-            val orientation = resolver.openInputStream(uri)?.use { input ->
-                ExifInterface(input).getAttributeInt(
-                    ExifInterface.TAG_ORIENTATION,
-                    ExifInterface.ORIENTATION_NORMAL
-                )
-            } ?: ExifInterface.ORIENTATION_NORMAL
+            // 1. 先读取 EXIF 方向角（非 JPEG 或特殊流容错降级，避免阻碍发送）
+            val orientation = runCatching {
+                resolver.openInputStream(uri)?.use { input ->
+                    ExifInterface(input).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                }
+            }.getOrNull() ?: ExifInterface.ORIENTATION_NORMAL
 
             // 2. 读取原图宽高并计算降采样倍率
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -112,20 +115,38 @@ object MediaHelper {
             val outH = finalBmp.height
             finalBmp.recycle()
 
-            val originalName = queryDisplayName(context, uri)
-                .substringBeforeLast('.')
-                .ifBlank { "photo_${System.currentTimeMillis()}" } + ".jpg"
+            val safeFileName = "photo_${System.currentTimeMillis()}.jpg"
 
-            val cacheDir = File(context.cacheDir, "chat_images").apply { if (!exists()) mkdirs() }
-            val cacheFile = File(cacheDir, "local_${System.currentTimeMillis()}.jpg")
+            val cacheDir = File(context.filesDir, "outbound_images").apply { if (!exists()) mkdirs() }
+            val cacheFile = File(cacheDir, safeFileName)
             FileOutputStream(cacheFile).use { it.write(jpegBytes) }
 
             CompressedImageResult(
                 bytes = jpegBytes,
                 width = outW,
                 height = outH,
-                fileName = originalName,
+                fileName = safeFileName,
                 localCacheFile = cacheFile
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun loadCompressedFromLocalFile(localPath: String): CompressedImageResult? {
+        if (localPath.isBlank()) return null
+        return try {
+            val f = File(localPath)
+            if (!f.exists() || f.length() <= 0L) return null
+            val bytes = f.readBytes()
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            CompressedImageResult(
+                bytes = bytes,
+                width = bounds.outWidth.coerceAtLeast(0),
+                height = bounds.outHeight.coerceAtLeast(0),
+                fileName = f.name.ifBlank { "photo_${System.currentTimeMillis()}.jpg" },
+                localCacheFile = f
             )
         } catch (_: Exception) {
             null

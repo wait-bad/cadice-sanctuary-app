@@ -115,16 +115,31 @@
                         android:textSize="12sp" />
                 </LinearLayout>
 
-                <!-- 气泡内嵌图片 -->
-                <ImageView
-                    android:id="@+id/iv_image_left"
-                    android:layout_width="210dp"
-                    android:layout_height="170dp"
-                    android:adjustViewBounds="true"
-                    android:scaleType="centerCrop"
-                    android:visibility="gone"
-                    android:contentDescription="聊天图片" />
+                    <!-- 气泡内嵌图片 -->
+                    <FrameLayout
+                        android:id="@+id/layout_image_left"
+                        android:layout_width="210dp"
+                        android:layout_height="170dp"
+                        android:visibility="gone">
 
+                        <TextView
+                            android:id="@+id/tv_image_state_left"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:gravity="center"
+                            android:padding="12dp"
+                            android:text="🖼️ 图片加载中..."
+                            android:textColor="#94A3B8"
+                            android:textSize="12sp" />
+
+                        <ImageView
+                            android:id="@+id/iv_image_left"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:adjustViewBounds="true"
+                            android:scaleType="centerCrop"
+                            android:contentDescription="聊天图片" />
+                    </FrameLayout>
                 <TextView
                     android:id="@+id/tv_content_left"
                     android:layout_width="wrap_content"

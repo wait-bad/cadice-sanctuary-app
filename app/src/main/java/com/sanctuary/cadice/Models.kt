@@ -44,8 +44,13 @@ data class ChatMessage(
     val imageHeight: Int = 0
 ) {
     val isImageMessage: Boolean
-        get() = contentType == "vocechat/file" && (filePath.isNotBlank() || localFileUri.isNotBlank()) &&
-            (content == "[图片]" || imageWidth > 0 || localFileUri.isNotBlank())
+        get() = contentType == "vocechat/file" &&
+            (filePath.isNotBlank() || localFileUri.isNotBlank()) &&
+            (content == "[图片]" || imageWidth > 0 || localFileUri.isNotBlank() ||
+                filePath.lowercase().let { p ->
+                    p.endsWith(".jpg") || p.endsWith(".jpeg") || p.endsWith(".png") ||
+                        p.endsWith(".webp") || p.endsWith(".gif") || p.endsWith(".bmp") || p.endsWith(".heic")
+                })
 
     companion object {
         const val STATUS_SENDING = 0

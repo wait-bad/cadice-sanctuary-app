@@ -212,16 +212,17 @@ class ChatAdapter(
             }
 
             if (msg.isImageMessage) {
-                holder.ivImage.visibility = View.VISIBLE
+                holder.layoutImage.visibility = View.VISIBLE
+                holder.tvImageState.visibility = View.VISIBLE
+                holder.tvImageState.text = "🖼️ 图片加载中..."
                 holder.tvContent.visibility = View.GONE
-                SanctuaryCore.loadChatImage(context, scope, serverUrl, msg.filePath, msg.localFileUri, holder.ivImage)
-                holder.ivImage.setOnClickListener { onImageClick?.invoke(msg) }
-                holder.ivImage.setOnLongClickListener {
-                    onMessageLongClick?.invoke(msg)
-                    true
-                }
+                bindBubbleImage(
+                    msg = msg,
+                    imageView = holder.ivImage,
+                    stateView = holder.tvImageState
+                )
             } else {
-                holder.ivImage.visibility = View.GONE
+                holder.layoutImage.visibility = View.GONE
                 holder.tvContent.visibility = View.VISIBLE
                 holder.tvContent.text = msg.content
                 holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
@@ -282,16 +283,17 @@ class ChatAdapter(
             }
 
             if (msg.isImageMessage) {
-                holder.ivImage.visibility = View.VISIBLE
+                holder.layoutImage.visibility = View.VISIBLE
+                holder.tvImageState.visibility = View.VISIBLE
+                holder.tvImageState.text = "🖼️ 图片加载中..."
                 holder.tvContent.visibility = View.GONE
-                SanctuaryCore.loadChatImage(context, scope, serverUrl, msg.filePath, msg.localFileUri, holder.ivImage)
-                holder.ivImage.setOnClickListener { onImageClick?.invoke(msg) }
-                holder.ivImage.setOnLongClickListener {
-                    onMessageLongClick?.invoke(msg)
-                    true
-                }
+                bindBubbleImage(
+                    msg = msg,
+                    imageView = holder.ivImage,
+                    stateView = holder.tvImageState
+                )
             } else {
-                holder.ivImage.visibility = View.GONE
+                holder.layoutImage.visibility = View.GONE
                 holder.tvContent.visibility = View.VISIBLE
                 holder.tvContent.text = msg.content
                 holder.tvContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * fontScale)
@@ -337,6 +339,35 @@ class ChatAdapter(
         }
     }
 
+    private fun bindBubbleImage(msg: ChatMessage, imageView: ImageView, stateView: TextView) {
+        fun startLoad() {
+            stateView.visibility = View.VISIBLE
+            stateView.text = "🖼️ 图片加载中..."
+            SanctuaryCore.loadChatImage(
+                context = context,
+                scope = scope,
+                serverUrl = serverUrl,
+                filePath = msg.filePath,
+                localFileUri = msg.localFileUri,
+                imageView = imageView
+            ) { loaded ->
+                if (loaded) {
+                    stateView.visibility = View.GONE
+                    imageView.setOnClickListener { onImageClick?.invoke(msg) }
+                } else {
+                    stateView.visibility = View.VISIBLE
+                    stateView.text = "🖼️ 加载失败\n点击重试"
+                    imageView.setOnClickListener { startLoad() }
+                }
+            }
+        }
+        startLoad()
+        imageView.setOnLongClickListener {
+            onMessageLongClick?.invoke(msg)
+            true
+        }
+    }
+
     class DateViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val cardDate: MaterialCardView = view.findViewById(R.id.card_date_divider)
         val tvDate: TextView = view.findViewById(R.id.tv_date_divider)
@@ -350,6 +381,8 @@ class ChatAdapter(
         val cardBubble: MaterialCardView = view.findViewById(R.id.card_bubble_left)
         val layoutReply: LinearLayout = view.findViewById(R.id.layout_reply_left)
         val tvReply: TextView = view.findViewById(R.id.tv_reply_left)
+        val layoutImage: android.widget.FrameLayout = view.findViewById(R.id.layout_image_left)
+        val tvImageState: TextView = view.findViewById(R.id.tv_image_state_left)
         val ivImage: ImageView = view.findViewById(R.id.iv_image_left)
         val tvContent: TextView = view.findViewById(R.id.tv_content_left)
     }
@@ -362,6 +395,8 @@ class ChatAdapter(
         val cardBubble: MaterialCardView = view.findViewById(R.id.card_bubble_right)
         val layoutReply: LinearLayout = view.findViewById(R.id.layout_reply_right)
         val tvReply: TextView = view.findViewById(R.id.tv_reply_right)
+        val layoutImage: android.widget.FrameLayout = view.findViewById(R.id.layout_image_right)
+        val tvImageState: TextView = view.findViewById(R.id.tv_image_state_right)
         val ivImage: ImageView = view.findViewById(R.id.iv_image_right)
         val tvContent: TextView = view.findViewById(R.id.tv_content_right)
     }

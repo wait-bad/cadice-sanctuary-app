@@ -727,14 +727,21 @@ class ChatActivity : AppCompatActivity() {
             )
             messageList.add(optimisticImg)
             submitRows(scrollToBottom = true)
+            SanctuaryCore.saveLocalChatMessages(this@ChatActivity, serverUrl, myUid, isGroup, targetId, listOf(optimisticImg))
 
+            dispatchSendImage(optimisticImg.mid, compressed)
+        }
+    }
+
+    private fun dispatchSendImage(tempMid: Long, compressed: CompressedImageResult) {
+        lifecycleScope.launch {
             val res = SanctuaryCore.uploadAndSendImageQueued(
                 this@ChatActivity, serverUrl, isGroup, targetId, compressed
             )
             if (res.success && res.mid > 0L) {
-                promoteSentMessage(optimisticImg.mid, res.mid, res.filePath)
+                promoteSentMessage(tempMid, res.mid, res.filePath)
             } else {
-                markSendFailed(optimisticImg.mid, res.error)
+                markSendFailed(tempMid, res.error)
             }
         }
     }
@@ -742,6 +749,19 @@ class ChatActivity : AppCompatActivity() {
     private fun retryFailedMessage(failedMsg: ChatMessage) {
         val idx = messageList.indexOfFirst { it.mid == failedMsg.mid }
         if (idx == -1) return
+        if (failedMsg.contentType == "vocechat/file") {
+            val compressed = MediaHelper.loadCompressedFromLocalFile(failedMsg.localFileUri)
+            if (compressed == null) {
+                Toast.makeText(this, "本地原图缓存已失效，请重新选择图片发送", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val retryingMsg = failedMsg.copy(syncStatus = ChatMessage.STATUS_SENDING, createdAt = System.currentTimeMillis())
+            messageList[idx] = retryingMsg
+            submitRows(scrollToBottom = false)
+            SanctuaryCore.updateLocalMessageStatus(this, serverUrl, myUid, isGroup, targetId, failedMsg.mid, ChatMessage.STATUS_SENDING)
+            dispatchSendImage(retryingMsg.mid, compressed)
+            return
+        }
         val retryingMsg = failedMsg.copy(syncStatus = ChatMessage.STATUS_SENDING, createdAt = System.currentTimeMillis())
         messageList[idx] = retryingMsg
         submitRows(scrollToBottom = false)
